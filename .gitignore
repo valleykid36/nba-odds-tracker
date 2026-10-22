@@ -5,6 +5,8 @@
 
 # Collected data (kept local; can get large)
 *.csv
+*.db
+*.db-journal
 
 # Python
 __pycache__/
