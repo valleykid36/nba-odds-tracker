@@ -1,15 +1,16 @@
 # NBA Odds Tracker
 
-A season-long NBA data pipeline and player-prop model. It collects box scores, injury reports, and odds from Pennsylvania-licensed sportsbooks into a local SQLite database, projects player three-pointers made with a matchup- and injury-aware model, and grades every prediction against real results and the betting market.
+A season-long NBA data pipeline and prediction system. It collects box scores, injury reports, and odds from Pennsylvania-licensed sportsbooks into a local SQLite database, projects player props (points, rebounds, assists, threes, PRA) and game lines (moneyline, spread, total) with matchup- and injury-aware models, ranks picks into tiers, and grades every prediction against real results and the betting market.
 
 ## Features
 
 - **Data warehouse (SQLite):** multi-season player box scores, game-line and player-prop odds snapshots, daily injury reports, predictions, and graded results
-- **Odds collection:** moneylines and player threes props from DraftKings, FanDuel, BetMGM, BetRivers, betPARX, and theScore Bet via [The Odds API](https://the-odds-api.com/), converted to vig-free probabilities
-- **Threes model v2:** projected minutes × 3PA rate × shrunk 3P%, weighted toward the current season, adjusted for opponent threes allowed and for teammates newly ruled out, with a negative binomial distribution
-- **Backtesting:** day-by-day replay of past seasons using only prior information; reports Brier score and calibration vs. a baseline model
-- **Grading:** scores each prediction against the box score and against the market's closing probability; tracks a flat-stake record for model "leans"
-- **Game model:** Elo ratings from 10+ seasons of results with self-grading
+- **Odds collection:** moneylines, spreads, totals, and player props from DraftKings, FanDuel, BetMGM, BetRivers, betPARX, and theScore Bet via [The Odds API](https://the-odds-api.com/), converted to vig-free probabilities
+- **Player prop model:** projected minutes × per-minute rates weighted toward the current season, adjusted for what the opponent allows and for teammates newly ruled out; threes use attempts × shrunk 3P%; negative binomial probabilities for every market
+- **Game model:** margin-of-victory Elo for moneyline and spread, recent scoring/allowing for totals
+- **Picks board:** BEST / CONSIDER / AVOID tiers with reasons and automatic red flags (role changes, early-season data, injury status, expensive prices)
+- **Backtesting:** day-by-day replay of past seasons using only prior information; Brier score and calibration per market
+- **Grading:** every pick scored against the box score and the market; record and ROI tracked per tier
 - API keys kept out of source code via environment variables
 
 ## Tech
@@ -35,7 +36,7 @@ Run it whenever you like; it catches up on everything since the last run.
 python daily.py
 ```
 
-Each run (free): refreshes box scores for every missed game, grades all pending predictions, shows the biggest three-point nights you missed, and updates the injury report. It then asks whether you're betting today; only if you say yes does it spend Odds API credits (1 for game odds + 1 per game you choose).
+Each run (free): refreshes box scores for every missed game, grades all pending predictions, shows the biggest scoring and three-point nights you missed, and updates the injury report. It then asks whether you're betting today and shows the credit cost before spending anything: 3 credits for game lines on every game, plus 1 per prop market per game you pick (choose markets in `config.py`).
 
 ```bash
 python daily.py report [date]   # re-show a day's predictions
@@ -48,10 +49,11 @@ python daily.py status          # database summary
 - [x] Odds collection, vig removal, PA sportsbook filter, line shopping
 - [x] Elo game model with backtest
 - [x] SQLite data warehouse + daily pipeline
-- [x] Threes model v2 with matchups, injuries, and backtesting
+- [x] Player prop model (PTS, REB, AST, 3PM, PRA) with matchups, injuries, and backtesting
+- [x] Game-line model (moneyline, spread, total)
+- [x] Tiered picks board
 - [x] Automatic grading vs. results and market
 - [ ] Rest days / back-to-backs and pace in the model
-- [ ] Points, rebounds, assists props
 - [ ] LLM parsing of injury and lineup news
 - [ ] FastAPI service + play-money odds website, deployed
 

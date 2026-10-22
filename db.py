@@ -55,6 +55,21 @@ CREATE TABLE IF NOT EXISTS predictions (
 );
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+
+CREATE TABLE IF NOT EXISTS game_lines (
+    snapshot_utc TEXT, event_id TEXT, tipoff_et TEXT, game_date TEXT,
+    home_team TEXT, away_team TEXT, book TEXT, market TEXT,
+    side TEXT, point REAL, price INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_gl ON game_lines(game_date, event_id);
+
+CREATE TABLE IF NOT EXISTS game_predictions (
+    game_date TEXT, event_id TEXT, home TEXT, away TEXT, market TEXT, side TEXT, point REAL,
+    model_prob REAL, market_prob REAL, best_price INTEGER, best_book TEXT, books INTEGER,
+    pred_margin REAL, pred_total REAL, early_games INTEGER, created_utc TEXT,
+    tier TEXT, result TEXT, final TEXT,
+    PRIMARY KEY (game_date, event_id, market, side)
+);
 """
 
 

@@ -3,9 +3,9 @@ ingest.py — everything that pulls data INTO nba.db.
 
   update_player_games(seasons)  NBA.com box scores (free, via nba_api)
   update_injuries()             ESPN injury report (free)
-  update_odds()                 game moneylines from PA books (1 Odds API credit)
+  update_odds()                 moneyline/spread/total, all games (3 credits)
   todays_events()               today's games (free)
-  update_props(event)           player threes lines for one game (1 credit)
+  update_props(event, markets)  player props for one game (1 credit per market)
   import_csvs()                 one-time import of your existing CSV files
 """
 
@@ -18,12 +18,21 @@ import requests
 from dotenv import load_dotenv
 
 from config import ET, PA_BOOKS, SEASONS, implied, player_key, team_abbr
-from db import connect
+from db import connect, set_meta
 
 load_dotenv()
 ODDS_KEY = os.getenv("ODDS_API_KEY")
 ODDS_BASE = "https://api.the-odds-api.com/v4/sports/basketball_nba"
 ESPN_INJURIES = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
+
+
+def remember_credits(resp):
+    left = resp.headers.get("x-requests-remaining")
+    if left is not None:
+        con = connect()
+        set_meta(con, "credits_left", left)
+        con.close()
+    return left
 
 
 def now_utc():
@@ -133,27 +142,36 @@ def update_injuries():
     print(f"   injuries: {len(rows)} players listed")
 
 
-# ---------------- Game moneylines (The Odds API) ----------------
+# ---------------- Game lines: moneyline, spread, total (The Odds API) ----------------
 def update_odds():
+    """All of today's games, 3 markets = 3 credits."""
     resp = requests.get(f"{ODDS_BASE}/odds/", timeout=15, params={
-        "apiKey": ODDS_KEY, "bookmakers": PA_BOOKS, "markets": "h2h", "oddsFormat": "american"})
+        "apiKey": ODDS_KEY, "bookmakers": PA_BOOKS, "markets": "h2h,spreads,totals",
+        "oddsFormat": "american"})
     resp.raise_for_status()
-    snap, rows = now_utc(), []
+    snap, ml_rows, line_rows = now_utc(), [], []
     for ev in resp.json():
         tip = to_et(ev["commence_time"])
         home, away = ev["home_team"], ev["away_team"]
+        when = (tip.strftime("%Y-%m-%d %H:%M"), tip.strftime("%Y-%m-%d"))
         for book in ev["bookmakers"]:
-            p = {o["name"]: o["price"] for o in book["markets"][0]["outcomes"]}
-            if home in p and away in p:
-                pa, ph = implied(p[away]), implied(p[home])
-                rows.append((snap, ev["id"], tip.strftime("%Y-%m-%d %H:%M"),
-                             tip.strftime("%Y-%m-%d"), away, home, book["title"],
-                             p[away], p[home], round(pa / (pa + ph), 4), round(ph / (pa + ph), 4)))
+            for mkt in book["markets"]:
+                for o in mkt["outcomes"]:
+                    side = ("home" if o["name"] == home else "away" if o["name"] == away else o["name"])
+                    line_rows.append((snap, ev["id"], *when, home, away, book["title"], mkt["key"],
+                                      side, o.get("point"), o["price"]))
+                if mkt["key"] == "h2h":
+                    p = {o["name"]: o["price"] for o in mkt["outcomes"]}
+                    if home in p and away in p:
+                        pa, ph = implied(p[away]), implied(p[home])
+                        ml_rows.append((snap, ev["id"], *when, away, home, book["title"], p[away],
+                                        p[home], round(pa / (pa + ph), 4), round(ph / (pa + ph), 4)))
     con = connect()
-    con.executemany("INSERT INTO odds_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+    con.executemany("INSERT INTO odds_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)", ml_rows)
+    con.executemany("INSERT INTO game_lines VALUES (?,?,?,?,?,?,?,?,?,?,?)", line_rows)
     con.commit()
     con.close()
-    print(f"   odds: {len(rows)} prices saved  [credits left: {resp.headers.get('x-requests-remaining')}]")
+    print(f"   game lines: {len(line_rows)} prices saved  [credits left: {remember_credits(resp)}]")
 
 
 # ---------------- Player props (The Odds API) ----------------
@@ -166,9 +184,11 @@ def todays_events():
                   key=lambda x: x[0])
 
 
-def update_props(event, market="player_threes"):
-    resp = requests.get(f"{ODDS_BASE}/events/{event['id']}/odds", timeout=15, params={
-        "apiKey": ODDS_KEY, "bookmakers": PA_BOOKS, "markets": market, "oddsFormat": "american"})
+def update_props(event, markets=("player_threes",)):
+    """One game, all requested prop markets in one call. Costs 1 credit per market returned."""
+    resp = requests.get(f"{ODDS_BASE}/events/{event['id']}/odds", timeout=20, params={
+        "apiKey": ODDS_KEY, "bookmakers": PA_BOOKS, "markets": ",".join(markets),
+        "oddsFormat": "american"})
     resp.raise_for_status()
     tip, snap, rows = to_et(event["commence_time"]), now_utc(), []
     for book in resp.json().get("bookmakers", []):
@@ -183,7 +203,7 @@ def update_props(event, market="player_threes"):
     con.executemany("INSERT INTO prop_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     con.commit()
     con.close()
-    print(f"   props: {len(rows)} prices saved  [credits left: {resp.headers.get('x-requests-remaining')}]")
+    print(f"   props: {len(rows)} prices saved  [credits left: {remember_credits(resp)}]")
     return snap
 
 
