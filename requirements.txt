@@ -1,3 +1,5 @@
 requests
 python-dotenv
 tzdata
+nba_api
+pandas
