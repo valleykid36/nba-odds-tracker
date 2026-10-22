@@ -30,6 +30,13 @@ INJURY_SHARE = 0.8      # share of an injured teammate's 3PA that gets redistrib
 NB_DISPERSION = 12.0    # negative binomial "r"; lower = more random games. Tune with backtest.
 LEAN_THRESHOLD = 0.05   # a "lean" = model and market disagree by at least 5%
 
+# ---------- Picks board tiers ----------
+BEST_EDGE = 0.07        # BEST: model beats market by 7%+ ...
+BEST_MIN_PRICE = -160   # ... at a price no worse than -160 ...
+BEST_MIN_GAMES = 2      # ... with at least this many games this season
+CONSIDER_EDGE = 0.04    # CONSIDER: 4%+ edge that doesn't meet every BEST rule
+ROLE_CHANGE_FLAG = 0.20 # 3PA rate up/down 20%+ vs last season = role changed
+
 # ---------- Names ----------
 TEAM_ABBR = {
     "Atlanta Hawks": "ATL", "Boston Celtics": "BOS", "Brooklyn Nets": "BKN",

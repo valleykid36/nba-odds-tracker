@@ -244,6 +244,12 @@ def predict_props(con, game_date, market="player_threes", season=CURRENT_SEASON)
 
         p_over = prob_over(line, proj["mean"])
         mkt_over, n_books, best = market_summary(prices)
+
+        # Role change: this season's 3PA per minute vs. previous seasons'.
+        # +0.30 = shooting 30% more threes per minute than before (bigger role).
+        role_change = None
+        if cur["min"] >= 30 and prior["min"] > 0 and prior["fg3a"] > 0:
+            role_change = (cur["fg3a"] / cur["min"]) / (prior["fg3a"] / prior["min"]) - 1
         rec = {
             "game_date": game_date, "event_id": m["event_id"], "player": m["player"],
             "player_key": key, "team": team, "opp": opp, "market": market, "line": line,
@@ -257,6 +263,8 @@ def predict_props(con, game_date, market="player_threes", season=CURRENT_SEASON)
             "best_under_price": best["Under"][0] if best["Under"] else None,
             "best_under_book": best["Under"][1] if best["Under"] else None,
             "notes": "; ".join(notes), "created_utc": m["snapshot_utc"],
+            "cur_games": cur["games"],
+            "role_change": round(role_change, 3) if role_change is not None else None,
         }
         con.execute(
             "INSERT OR REPLACE INTO predictions (" + ",".join(rec) + ") VALUES (" +

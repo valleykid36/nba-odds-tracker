@@ -68,8 +68,21 @@ def set_meta(con, key, value):
     con.commit()
 
 
+NEW_COLUMNS = [  # added after the first version; older databases get them automatically
+    ("predictions", "cur_games", "INTEGER"),
+    ("predictions", "role_change", "REAL"),
+    ("predictions", "tier", "TEXT"),
+    ("predictions", "pick_side", "TEXT"),
+]
+
+
 def connect():
     con = sqlite3.connect(DB_FILE)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    for table, col, kind in NEW_COLUMNS:
+        cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
+    con.commit()
     return con

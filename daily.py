@@ -19,7 +19,7 @@ plan has no history, so those days simply have no lines. Box scores and grading
 always catch up fully.
 
 Other commands (optional):
-    python daily.py report [YYYY-MM-DD]   re-show a day's predictions (free)
+    python daily.py picks [YYYY-MM-DD]    show the picks board again (free)
     python daily.py backtest              test the threes model on past seasons
     python daily.py status                what's in the database
 """
@@ -27,7 +27,7 @@ Other commands (optional):
 import sys
 from datetime import datetime
 
-from config import CURRENT_SEASON, ET, LEAN_THRESHOLD, SEASONS, payout
+from config import CURRENT_SEASON, ET, SEASONS, payout
 from db import connect, get_meta, set_meta
 
 
@@ -162,21 +162,25 @@ def scoreboard(con):
     print(f"\n=== Scoreboard: {n} graded lines over {days} betting day(s) ===")
     print(f"Brier  model {b_model:.4f}  vs  market {b_mkt:.4f}   (lower wins; the market is the bar)")
 
-    leans = []
-    for r, y in zip(rows, hits):
-        gap = r["p_over"] - r["market_over"]
-        over = gap > 0
-        price = r["best_over_price"] if over else r["best_under_price"]
-        if abs(gap) >= LEAN_THRESHOLD and price is not None:
+    print("Record by tier (1 unit each at the best PA price):")
+    for tier in ("BEST", "CONSIDER", "AVOID"):
+        bets = []
+        for r, y in zip(rows, hits):
+            if r["tier"] != tier or not r["pick_side"]:
+                continue
+            over = r["pick_side"] == "Over"
+            price = r["best_over_price"] if over else r["best_under_price"]
+            if price is None:
+                continue
             won = (y == 1) == over
-            leans.append((won, payout(price) if won else -1.0))
-    if leans:
-        w = sum(1 for won, _ in leans if won)
-        profit = sum(p for _, p in leans)
-        print(f"Model leans, 1 unit each at best PA price: {w}-{len(leans) - w}, "
-              f"{profit:+.2f} units ({profit / len(leans):+.1%} ROI)")
-        if len(leans) < 200:
-            print(f"   ({len(leans)} leans is still a small sample; treat as noise under ~200)")
+            bets.append(payout(price) if won else -1.0)
+        if bets:
+            wins = sum(1 for b in bets if b > 0)
+            print(f"   {tier:<9} {wins}-{len(bets) - wins}   {sum(bets):+.2f} units   "
+                  f"({sum(bets) / len(bets):+.1%} ROI)")
+        else:
+            print(f"   {tier:<9} no graded picks yet")
+    print("   (AVOID = what you'd get betting the model's stale picks. Small samples are noise until ~200.)")
 
 
 # ---------------- what you missed ----------------
@@ -195,32 +199,99 @@ def missed(con, since):
         print(f"   {r['fg3m']}-{r['fg3a']}  {r['player_name']} ({r['team']} vs {r['opp']}, {r['game_date']})")
 
 
-# ---------------- report ----------------
+# ---------------- picks board ----------------
+def classify(p):
+    """Decide BEST / CONSIDER / AVOID for one prediction. Returns (tier, side, price, book, edge, why, warn)."""
+    from config import (BEST_EDGE, BEST_MIN_GAMES, BEST_MIN_PRICE, CONSIDER_EDGE,
+                        ROLE_CHANGE_FLAG)
+    gap = p["p_over"] - p["market_over"]
+    over = gap > 0
+    side = "Over" if over else "Under"
+    price = p["best_over_price"] if over else p["best_under_price"]
+    book = p["best_over_book"] if over else p["best_under_book"]
+    edge = abs(gap)
+    if edge < CONSIDER_EDGE or price is None:
+        return None
+
+    why, warn = [], []
+    why.append(f"{p['exp_3pa']:.1f} 3PA x {p['pct']:.0%} = {p['mean']:.1f} makes")
+    if p["opp_factor"] >= 1.04:
+        why.append("opp allows lots of 3s")
+    elif p["opp_factor"] <= 0.96:
+        why.append("opp limits 3s")
+    if p["injury_boost"]:
+        why.append(f"teammates out (+{p['injury_boost']:.1f} 3PA)")
+
+    role = p["role_change"]
+    role_against = role is not None and (
+        (not over and role >= ROLE_CHANGE_FLAG) or (over and role <= -ROLE_CHANGE_FLAG))
+    if role is not None and abs(role) >= ROLE_CHANGE_FLAG and not role_against:
+        why.append(f"role {'up' if role > 0 else 'down'} {abs(role):.0%}")
+    if role_against:
+        warn.append(f"3PA rate {role:+.0%} vs last season, opposite to this pick")
+    games = p["cur_games"] or 0
+    if games < BEST_MIN_GAMES:
+        warn.append(f"only {games} game{'s' * (games != 1)} this season; relies on last season")
+    if "self:" in (p["notes"] or ""):
+        warn.append(p["notes"].split(";")[0].replace("self:", "status:").strip())
+    if price < BEST_MIN_PRICE:
+        warn.append(f"expensive ({price:+d})")
+
+    if role_against or (not over and games < BEST_MIN_GAMES and edge >= BEST_EDGE):
+        tier = "AVOID"   # big Under lean on stale data = the blind spot we saw
+    elif edge >= BEST_EDGE and not warn:
+        tier = "BEST"
+    else:
+        tier = "CONSIDER"
+    return tier, side, price, book, edge, why, warn
+
+
 def show_report(con, game_date):
     preds = con.execute("SELECT * FROM predictions WHERE game_date=? AND market_over IS NOT NULL",
                         (game_date,)).fetchall()
     if not preds:
-        print(f"No predictions for {game_date}.")
+        print(f"No predictions for {game_date}. Run daily.py and answer 'y' to pull lines.")
         return
-    preds = sorted(preds, key=lambda p: abs(p["p_over"] - p["market_over"]), reverse=True)
-    print(f"\n=== Threes model v2 vs. market — {game_date} ({len(preds)} lines) ===")
-    print("proj min | expected 3PA x 3P% = expected makes | opp >1 = opponent allows more threes\n")
+
+    board = {"BEST": [], "CONSIDER": [], "AVOID": []}
     for p in preds:
-        gap = p["p_over"] - p["market_over"]
-        side = "Over" if gap > 0 else "Under"
-        price = p["best_over_price"] if side == "Over" else p["best_under_price"]
-        book = p["best_over_book"] if side == "Over" else p["best_under_book"]
-        flag = "LEAN" if abs(gap) >= LEAN_THRESHOLD else "    "
-        price_txt = f"{price:+d} {book}" if price is not None else ""
-        print(f"{flag} {p['player']} ({p['team']} vs {p['opp']})  {side} {p['line']}  {price_txt}")
-        print(f"     model Over {p['p_over']:.0%} vs market {p['market_over']:.0%}  |  "
-              f"{p['proj_min']:.0f} min, {p['exp_3pa']:.1f} 3PA x {p['pct']:.0%} = {p['mean']:.2f}  |  "
-              f"opp {p['opp_factor']:.2f}"
-              + (f"  |  injuries +{p['injury_boost']:.1f} 3PA" if p["injury_boost"] else ""))
-        if p["notes"]:
-            print(f"     note: {p['notes']}")
-    print("\nLEAN = model and market disagree by 5%+. Everything is logged and graded "
-          "automatically next time you run daily.py.")
+        c = classify(p)
+        tier, side = (c[0], c[1]) if c else (None, None)
+        con.execute("UPDATE predictions SET tier=?, pick_side=? WHERE game_date=? AND player_key=? "
+                    "AND market=? AND line=?",
+                    (tier, side, p["game_date"], p["player_key"], p["market"], p["line"]))
+        if c:
+            board[c[0]].append((p, *c[1:]))
+    con.commit()
+
+    w = 96
+    print("\n" + "=" * w)
+    print(f" THREES PICKS BOARD — {game_date}   ({len(preds)} lines checked)".center(w))
+    print("=" * w)
+    labels = {
+        "BEST": "BEST  — model edge 7%+, fair price, no red flags",
+        "CONSIDER": "CONSIDER — smaller edge or one warning",
+        "AVOID": "AVOID — model disagrees, but its data is likely stale",
+    }
+    for tier in ("BEST", "CONSIDER", "AVOID"):
+        rows = sorted(board[tier], key=lambda r: r[4], reverse=True)
+        print(f"\n{labels[tier]}")
+        if not rows:
+            print("   (none)")
+            continue
+        print(f"   {'PLAYER':<24}{'PICK':<13}{'PRICE':<20}{'MODEL':>7}{'MARKET':>8}{'EDGE':>7}")
+        for p, side, price, book, edge, why, warn in rows:
+            model = p["p_over"] if side == "Over" else 1 - p["p_over"]
+            market = p["market_over"] if side == "Over" else 1 - p["market_over"]
+            print(f"   {p['player'][:23]:<24}{side + ' ' + str(p['line']):<13}"
+                  f"{f'{price:+d} {book}'[:19]:<20}{model:>7.0%}{market:>8.0%}{edge:>7.0%}")
+            print(f"      {p['team']} vs {p['opp']}: " + ", ".join(why))
+            for x in warn:
+                print(f"      ! {x}")
+    print("\n" + "-" * w)
+    print(" Edge = model % minus market %. All picks are logged and graded automatically;")
+    print(" the scoreboard tracks BEST and CONSIDER separately so you'll learn which tier to trust.")
+    print("-" * w)
 
 
 # ---------------- optional commands ----------------
@@ -243,7 +314,8 @@ def cmd_status():
     print(f"Last run:   {get_meta(con, 'last_run', 'never')}")
 
 
-COMMANDS = {"report": cmd_report, "backtest": cmd_backtest, "status": cmd_status}
+COMMANDS = {"report": cmd_report, "picks": cmd_report, "backtest": cmd_backtest,
+            "status": cmd_status}
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in COMMANDS:
