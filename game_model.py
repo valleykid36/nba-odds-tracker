@@ -4,15 +4,17 @@ game_model.py — moneyline, spread, and total predictions for every game.
 Built entirely from the box scores already in nba.db (no extra downloads):
   * Elo ratings (with margin of victory and off-season regression) -> predicted margin
   * Each team's recent points scored and allowed -> predicted total
+  * Rest: a team on the 2nd night of a back-to-back loses REST_B2B_POINTS of margin
   * Margin and total turned into probabilities with a normal distribution,
     then compared to the sportsbooks' vig-free prices.
 """
 
 import math
 from collections import defaultdict, deque
+from datetime import date as _date
 
 from config import (CURRENT_SEASON, ELO_HOME, ELO_K, ELO_PER_POINT, ELO_REVERT,
-                    MARGIN_SD, TEAM_WINDOW, TOTAL_SD, implied, team_abbr)
+                    MARGIN_SD, REST_B2B_POINTS, TEAM_WINDOW, TOTAL_SD, implied, team_abbr)
 
 
 def phi(x):
@@ -45,6 +47,12 @@ class TeamModel:
         self.allowed = defaultdict(lambda: deque(maxlen=TEAM_WINDOW))
         self.games_this_season = defaultdict(int)
         self.league = deque(maxlen=400)
+        self.last_date = {}
+
+    def b2b(self, team, game_date):
+        last = self.last_date.get(team)
+        return bool(last and game_date and
+                    (_date.fromisoformat(game_date) - _date.fromisoformat(last)).days == 1)
 
     def new_season(self, season):
         if self.season is not None and season != self.season:
@@ -53,9 +61,12 @@ class TeamModel:
             self.games_this_season.clear()
         self.season = season
 
-    def predict(self, home, away):
+    def predict(self, home, away, game_date=None, rest=True):
+        """Predicted home margin and total. With a date, back-to-backs adjust the margin."""
         diff = self.elo[home] + ELO_HOME - self.elo[away]
         margin = diff / ELO_PER_POINT
+        if rest and game_date:
+            margin += REST_B2B_POINTS * (self.b2b(away, game_date) - self.b2b(home, game_date))
         lg = sum(self.league) / len(self.league) if self.league else 112.0
 
         def avg(d, team):
@@ -64,8 +75,10 @@ class TeamModel:
         away_pts = (avg(self.scored, away) + avg(self.allowed, home)) / 2
         return margin, home_pts + away_pts
 
-    def update(self, season, home, away, hp, ap):
+    def update(self, season, home, away, hp, ap, game_date=None):
         self.new_season(season)
+        if game_date:
+            self.last_date[home] = self.last_date[away] = game_date
         p = 1 / (1 + 10 ** (-(self.elo[home] + ELO_HOME - self.elo[away]) / 400))
         won = 1 if hp > ap else 0
         diff = (self.elo[home] + ELO_HOME - self.elo[away]) * (1 if won else -1)
@@ -83,7 +96,7 @@ class TeamModel:
 def build_model(con, before_date):
     m = TeamModel()
     for date, season, home, away, hp, ap in team_results(con, before_date):
-        m.update(season, home, away, hp, ap)
+        m.update(season, home, away, hp, ap, date)
     m.new_season(CURRENT_SEASON)
     return m
 
@@ -104,7 +117,9 @@ def predict_games(con, game_date):
     out = []
     for ev, lines in events.items():
         home, away = team_abbr(lines[0]["home_team"]), team_abbr(lines[0]["away_team"])
-        margin, total = model.predict(home, away)
+        margin, total = model.predict(home, away, game_date)
+        tired = [t for t in (away, home) if model.b2b(t, game_date)]
+        rest_note = (" and ".join(tired) + " on a back-to-back") if tired else ""
         early = min(model.games_this_season[home], model.games_this_season[away])
         for market in ("h2h", "spreads", "totals"):
             ml = [r for r in lines if r["market"] == market]
@@ -146,6 +161,7 @@ def predict_games(con, game_date):
                     "best_price": b["price"], "best_book": b["book"], "books": len(fair),
                     "pred_margin": round(margin, 1), "pred_total": round(total, 1),
                     "early_games": early, "created_utc": b["snapshot_utc"],
+                    "rest_note": rest_note,
                 }
                 con.execute("INSERT OR REPLACE INTO game_predictions (" + ",".join(rec) +
                             ") VALUES (" + ",".join("?" * len(rec)) + ")", list(rec.values()))
@@ -184,23 +200,26 @@ def grade_games(con, today):
 
 def backtest_games(con, from_season=CURRENT_SEASON - 2):
     m = TeamModel()
-    briers, correct, total_err, base_err, n = [], 0, 0.0, 0.0, 0
+    briers, no_rest, correct, total_err, base_err, n = [], [], 0, 0.0, 0.0, 0
     for date, season, home, away, hp, ap in team_results(con):
         m.new_season(season)
         if season >= from_season and m.games_this_season[home] >= 3 and m.games_this_season[away] >= 3:
-            margin, total = m.predict(home, away)
+            margin, total = m.predict(home, away, date)
             p = phi(margin / MARGIN_SD)
             won = 1 if hp > ap else 0
             briers.append((p - won) ** 2)
+            no_rest.append((phi(m.predict(home, away, date, rest=False)[0] / MARGIN_SD) - won) ** 2)
             correct += (p >= 0.5) == bool(won)
             lg = sum(m.league) / len(m.league) * 2
             total_err += abs(total - (hp + ap))
             base_err += abs(lg - (hp + ap))
             n += 1
-        m.update(season, home, away, hp, ap)
+        m.update(season, home, away, hp, ap, date)
     if not n:
         print("Not enough games to backtest.")
         return
     print(f"\n=== Game model backtest: {n:,} games, seasons {from_season}+ ===")
     print(f"Winner picked correctly: {correct / n:.1%}   Brier: {sum(briers) / n:.4f} (coin flip 0.2500)")
+    print(f"Rest/back-to-back data: Brier {sum(briers) / n:.4f} with it vs {sum(no_rest) / n:.4f} "
+          f"without ({'helps' if sum(briers) < sum(no_rest) else 'does not help; set REST_B2B_POINTS = 0'})")
     print(f"Total points, avg miss:  {total_err / n:.1f} pts  (league-average guess misses by {base_err / n:.1f})")

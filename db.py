@@ -88,6 +88,12 @@ NEW_COLUMNS = [  # added after the first version; older databases get them autom
     ("predictions", "role_change", "REAL"),
     ("predictions", "tier", "TEXT"),
     ("predictions", "pick_side", "TEXT"),
+    ("predictions", "p_blend", "REAL"),        # win% of the picked side after blending with market
+    ("predictions", "ev", "REAL"),             # expected value per unit at the best price
+    ("predictions", "b2b", "INTEGER"),         # player's team on 2nd night of a back-to-back
+    ("game_predictions", "p_blend", "REAL"),
+    ("game_predictions", "ev", "REAL"),
+    ("game_predictions", "rest_note", "TEXT"),
 ]
 
 

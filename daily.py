@@ -11,16 +11,22 @@ Every time, for free (no Odds API credits):
   5. Refreshes today's injury report.
   6. Lists today's games and asks if you're betting today.
      - No  -> done. 0 credits spent.
-     - Yes -> you pick the games, it shows the credit cost, then pulls game lines
-              + player props and prints the picks board.
+     - Yes -> it plans which games are worth credits (injury news first) inside
+              today's budget, you confirm or change it, then it pulls lines and
+              prints only the good picks.
 
-Choose which prop types to pull (and save credits) in config.py -> PULL_PROP_MARKETS.
+Prefer a window? Run:  python app.py
+
+Credits: 500/month on the free plan, reset on the 1st. The daily budget spreads what's
+left across the days until the reset. Lines pulled in the last few hours are reused.
+Choose which prop types to pull in config.py -> PULL_PROP_MARKETS.
 
 What CAN'T be caught up: odds and injuries for days you skipped (the free Odds API
 plan has no history). Box scores and grading always catch up fully.
 
 Other commands (optional):
-    python daily.py picks [YYYY-MM-DD]    show the picks board again (free)
+    python daily.py picks [YYYY-MM-DD]    show the good picks again (free); add "all" for every tier
+    python daily.py credits               credit balance and today's budget (free)
     python daily.py backtest              test the models on past seasons (free)
     python daily.py status                what's in the database
 """
@@ -28,9 +34,7 @@ Other commands (optional):
 import sys
 from datetime import datetime
 
-from config import (BEST_EDGE, BEST_MIN_GAMES, BEST_MIN_PRICE, CONSIDER_EDGE, CURRENT_SEASON,
-                    ET, PROP_MARKETS, PULL_GAME_LINES, PULL_PROP_MARKETS, ROLE_CHANGE_FLAG,
-                    SEASONS, payout)
+from config import CURRENT_SEASON, ET, PROP_MARKETS, PULL_GAME_LINES, PULL_PROP_MARKETS, SEASONS
 from db import connect, get_meta, set_meta
 
 
@@ -46,8 +50,8 @@ def ask(prompt):
 
 
 # ======================= the main routine =======================
-def run():
-    con = connect()
+def catch_up(con):
+    """Steps 1-5. All free: box scores, grading, what you missed, injuries."""
     last_run = get_meta(con, "last_run")
     if last_run:
         days = (datetime.fromisoformat(today()) - datetime.fromisoformat(last_run)).days
@@ -67,7 +71,7 @@ def run():
         print("Downloading past seasons (one time, a few minutes):", ", ".join(missing))
 
     # 2) Box scores (catches every missed game)
-    from ingest import todays_events, update_injuries, update_player_games
+    from ingest import update_injuries, update_player_games
     count = "SELECT COUNT(DISTINCT game_id) FROM player_games WHERE season=?"
     before = con.execute(count, (CURRENT_SEASON,)).fetchone()[0]
     print("Updating box scores...")
@@ -88,42 +92,82 @@ def run():
         print(f"   couldn't reach ESPN ({e}); continuing without today's injuries")
     set_meta(con, "last_run", today())
 
+
+def pull(con, chosen, lines=PULL_GAME_LINES, force=False):
+    """Spend credits: game lines + props for the chosen events, then predict. Returns credits used."""
+    from game_model import predict_games
+    from ingest import update_odds, update_props
+    from props_model import predict_props
+    used = 0
+    if lines:
+        print("\nGame lines (moneyline, spread, total)...")
+        used += update_odds(force=force)
+    for tip, ev in chosen:
+        print(f"Player props: {ev['away_team']} @ {ev['home_team']}")
+        used += update_props(ev, PULL_PROP_MARKETS, force=force)
+    predict_games(con, today())
+    predict_props(con, today())
+    print(f"\nCredits used this pull: {used}")
+    return used
+
+
+def print_plan(plan_):
+    b = plan_["budget"]
+    print(f"\nToday's budget: {b if b is not None else 'unknown (first pull)'} credits"
+          f"  (game lines {plan_['lines_cost']}, props {len(PULL_PROP_MARKETS)} per game)")
+    for i, g in enumerate(plan_["games"], 1):
+        mark = "x" if g["chosen"] else " "
+        note = "; ".join(g["reasons"]) or "no injury/rest news"
+        cost = f"{g['cost']} cr" if g["cost"] else "already pulled"
+        print(f"  [{mark}] {i}. {g['tip']:%I:%M %p}  {g['event']['away_team']} @ "
+              f"{g['event']['home_team']}  ({cost})  {note}")
+    print(f"Planned: {plan_['total']} credits")
+
+
+def run():
+    from budget import credits_left, days_until_reset, plan, reset_date
+    from ingest import todays_events
+    con = connect()
+    catch_up(con)
+
     # 6) Betting today?
-    events = todays_events()
+    events = todays_events()     # free, and refreshes the credit balance
     if not events:
         print("\nNo more games today. You're all caught up.")
         return
-    print(f"\nToday's games ({len(events)}):")
+    left = credits_left(con)
+    print(f"\nCredits left: {left if left is not None else 'unknown'}  "
+          f"(resets {reset_date():%b} 1, {days_until_reset()} days incl. today)")
+    print(f"Today's games ({len(events)}):")
     for i, (tip, ev) in enumerate(events, 1):
         print(f"  {i}. {tip:%I:%M %p}  {ev['away_team']} @ {ev['home_team']}")
     if ask("\nBetting today? (y/N): ") not in ("y", "yes"):
         print("No credits spent. You're all caught up.")
         return
 
+    p = plan(con, events, today())
+    print_plan(p)
     labels = ", ".join(PROP_MARKETS[m]["label"] for m in PULL_PROP_MARKETS)
-    pick = ask(f"Which games for player props ({labels})? e.g. 1,3 or 'all' or 'none': ")
-    chosen = events if pick == "all" else [] if pick in ("none", "") else [
-        e for i, e in enumerate(events, 1) if str(i) in pick.replace(" ", "").split(",")]
-    cost = (3 if PULL_GAME_LINES else 0) + len(chosen) * len(PULL_PROP_MARKETS)
-    left = get_meta(con, "credits_left", "unknown")
-    print(f"\nThis will use up to {cost} credits "
-          f"({'3 for game lines on all games + ' if PULL_GAME_LINES else ''}"
-          f"{len(PULL_PROP_MARKETS)} per game for props). Credits left: {left}")
-    if cost == 0 or ask("Go? (Y/n): ") in ("n", "no"):
+    pick = ask(f"Press Enter for the plan, or choose games for props ({labels}) e.g. 1,3 / 'all' / 'none': ")
+    if pick == "":
+        chosen = [(g["tip"], g["event"]) for g in p["games"] if g["chosen"]]
+    else:
+        chosen = events if pick == "all" else [] if pick == "none" else [
+            e for i, e in enumerate(events, 1) if str(i) in pick.replace(" ", "").split(",")]
+    from ingest import fresh_prop_markets
+    cost = p["lines_cost"] + sum(len([m for m in PULL_PROP_MARKETS
+                                      if m not in fresh_prop_markets(con, ev["id"])])
+                                 for _, ev in chosen)
+    print(f"\nThis will use up to {cost} credits. Credits left: {left if left is not None else 'unknown'}")
+    if left is not None and cost > left:
+        print("That's more than you have. Pick fewer games.")
+        return
+    if cost == 0 and not chosen and not p["lines_cost"]:
+        print("Everything is already pulled; showing picks.")
+    elif ask("Go? (Y/n): ") in ("n", "no"):
         print("Cancelled. No credits spent.")
         return
-
-    from game_model import predict_games
-    from ingest import update_odds, update_props
-    from props_model import predict_props
-    if PULL_GAME_LINES:
-        print("\nGame lines (moneyline, spread, total)...")
-        update_odds()
-    for tip, ev in chosen:
-        print(f"Player props: {ev['away_team']} @ {ev['home_team']}")
-        update_props(ev, PULL_PROP_MARKETS)
-    predict_games(con, today())
-    predict_props(con, today())
+    pull(con, chosen)
     show_board(con, today())
     con.close()
 
@@ -160,39 +204,24 @@ def grade(con):
 
 
 def scoreboard(con):
-    props = con.execute("SELECT * FROM predictions WHERE result IN ('Over','Under') "
-                        "AND market_over IS NOT NULL").fetchall()
-    games = con.execute("SELECT * FROM game_predictions WHERE result IN ('W','L','P') "
-                        "AND tier IS NOT NULL").fetchall()
-    if not props and not games:
+    from picks import learned_trust, market_label, records
+    rec = records(con)
+    if not any(r["w"] + r["l"] for r in rec.values()):
         print("Scoreboard: nothing graded yet. It fills in after your first betting day.")
         return
-    print(f"\n=== Scoreboard ===")
-    if props:
-        n = len(props)
-        y = [1 if r["result"] == "Over" else 0 for r in props]
-        bm = sum((r["p_over"] - v) ** 2 for r, v in zip(props, y)) / n
-        bk = sum((r["market_over"] - v) ** 2 for r, v in zip(props, y)) / n
-        print(f"Props accuracy ({n} lines): Brier model {bm:.4f} vs market {bk:.4f} (lower wins)")
-
-    print("Record of picks, 1 unit each at the best PA price:")
-    for tier in ("BEST", "CONSIDER", "AVOID"):
-        bets = []
-        for r in props:
-            if r["tier"] == tier and r["pick_side"]:
-                over = r["pick_side"] == "Over"
-                price = r["best_over_price"] if over else r["best_under_price"]
-                if price is not None:
-                    won = (r["result"] == "Over") == over
-                    bets.append(payout(price) if won else -1.0)
-        for r in games:
-            if r["tier"] == tier and r["result"] != "P":
-                bets.append(payout(r["best_price"]) if r["result"] == "W" else -1.0)
-        if bets:
-            w = sum(1 for b in bets if b > 0)
-            print(f"   {tier:<9} {w}-{len(bets) - w}   {sum(bets):+.2f} units  ({sum(bets) / len(bets):+.1%} ROI)")
+    print("\n=== Scoreboard (1 unit per pick at the best PA price) ===")
+    for tier, r in rec.items():
+        if r["w"] + r["l"]:
+            print(f"   {tier:<9} {r['w']}-{r['l']}   {r['units']:+.2f} units  ({r['roi']:+.1%} ROI)")
         else:
             print(f"   {tier:<9} no graded picks yet")
+    trust = learned_trust(con)
+    if trust:
+        print("How sharp is the model vs the books, by market (Brier, lower wins):")
+        for m, t in sorted(trust.items(), key=lambda x: -x[1]["n"]):
+            better = "model" if t["model"] < t["market"] else "books"
+            print(f"   {market_label(m):<7} {t['n']:>6,} lines  model {t['model']:.4f}  books "
+                  f"{t['market']:.4f}  -> {better} sharper; trusting model {t['trust']:.0%}")
     print("   (Small samples are noise; judge each tier after ~200 picks.)")
 
 
@@ -213,142 +242,58 @@ def missed(con, since):
 
 
 # ======================= picks board =======================
-def classify_prop(p):
-    gap = p["p_over"] - p["market_over"]
-    over = gap > 0
-    side = "Over" if over else "Under"
-    price = p["best_over_price"] if over else p["best_under_price"]
-    book = p["best_over_book"] if over else p["best_under_book"]
-    edge = abs(gap)
-    if edge < CONSIDER_EDGE or price is None:
-        return None
-    label = PROP_MARKETS.get(p["market"], {"label": p["market"]})["label"]
-    why = [f"proj {p['mean']:.1f} {label} in {p['proj_min']:.0f} min"]
-    if p["opp_factor"] >= 1.04:
-        why.append("opponent gives up a lot of this")
-    elif p["opp_factor"] <= 0.96:
-        why.append("opponent limits this")
-    if p["injury_boost"] and p["injury_boost"] >= 0.1:
-        why.append(f"teammates out (+{p['injury_boost']:.1f})")
-    warn = []
-    role = p["role_change"]
-    role_against = role is not None and ((not over and role >= ROLE_CHANGE_FLAG)
-                                         or (over and role <= -ROLE_CHANGE_FLAG))
-    if role is not None and abs(role) >= ROLE_CHANGE_FLAG and not role_against:
-        why.append(f"production {'up' if role > 0 else 'down'} {abs(role):.0%} this season")
-    if role_against:
-        warn.append(f"production {role:+.0%} vs last season, opposite to this pick")
-    games = p["cur_games"] or 0
-    if games < BEST_MIN_GAMES:
-        warn.append(f"{games} game{'s' * (games != 1)} this season; leans on last season")
-    if "self:" in (p["notes"] or ""):
-        warn.append(p["notes"].split(";")[0].replace("self:", "status:").strip())
-    if price < BEST_MIN_PRICE:
-        warn.append(f"expensive ({price:+d})")
-    if role_against or (not over and games < BEST_MIN_GAMES and edge >= BEST_EDGE):
-        tier = "AVOID"
-    elif edge >= BEST_EDGE and not warn:
-        tier = "BEST"
-    else:
-        tier = "CONSIDER"
-    pick = f"{side} {p['line']:g} {label}"
-    model = p["p_over"] if over else 1 - p["p_over"]
-    market = p["market_over"] if over else 1 - p["market_over"]
-    return dict(tier=tier, side=side, name=p["player"], matchup=f"{p['team']} vs {p['opp']}",
-                pick=pick, price=price, book=book, model=model, market=market, edge=edge,
-                why=why, warn=warn)
-
-
-def classify_games(rows):
-    """For each game+market keep the side the model likes more.
-    Returns (board entries, [(tier or None, row) for every row])."""
-    from collections import defaultdict
-    by = defaultdict(list)
-    for r in rows:
-        by[(r["event_id"], r["market"])].append(r)
-    entries, tiers = [], []
-    for (_, market), sides in by.items():
-        r = max(sides, key=lambda s: s["model_prob"] - s["market_prob"])
-        edge = r["model_prob"] - r["market_prob"]
-        tier = None
-        if edge >= CONSIDER_EDGE:
-            warn = []
-            if r["early_games"] < BEST_MIN_GAMES:
-                warn.append("early season: ratings still lean on last season")
-            if r["best_price"] < BEST_MIN_PRICE:
-                warn.append(f"expensive ({r['best_price']:+d})")
-            tier = "BEST" if edge >= BEST_EDGE and not warn else "CONSIDER"
-            team = r["home"] if r["side"] == "home" else r["away"]
-            pick = (f"{team} ML" if market == "h2h" else f"{team} {r['point']:+g}"
-                    if market == "spreads" else f"{r['side']} {r['point']:g} total")
-            fav = r["home"] if r["pred_margin"] >= 0 else r["away"]
-            entries.append(dict(tier=tier, name=f"{r['away']} @ {r['home']}", matchup="game",
-                                pick=pick, price=r["best_price"], book=r["best_book"],
-                                model=r["model_prob"], market=r["market_prob"], edge=edge,
-                                why=[f"model: {fav} by {abs(r['pred_margin']):.1f}, "
-                                     f"total {r['pred_total']:.0f}"], warn=warn))
-        tiers.extend((tier if s is r else None, s) for s in sides)
-    return entries, tiers
-
-
-def show_board(con, game_date):
-    preds = con.execute("SELECT * FROM predictions WHERE game_date=? AND market_over IS NOT NULL",
-                        (game_date,)).fetchall()
-    grows = con.execute("SELECT * FROM game_predictions WHERE game_date=?", (game_date,)).fetchall()
-    if not preds and not grows:
-        print(f"No picks for {game_date}. Run daily.py and answer 'y' to pull lines.")
+def show_board(con, game_date, show_all=False):
+    from picks import build_board
+    board, n_props, n_games = build_board(con, game_date)
+    if not n_props and not n_games:
+        print(f"No lines for {game_date}. Run daily.py (or app.py) and pull lines.")
         return
-
-    entries = []
-    for p in preds:
-        c = classify_prop(p)
-        con.execute("UPDATE predictions SET tier=?, pick_side=? WHERE game_date=? AND player_key=? "
-                    "AND market=? AND line=?", (c["tier"] if c else None, c["side"] if c else None,
-                                                p["game_date"], p["player_key"], p["market"], p["line"]))
-        if c:
-            entries.append(c)
-    game_entries, game_tiers = classify_games(grows)
-    for tier, s in game_tiers:
-        con.execute("UPDATE game_predictions SET tier=? WHERE game_date=? AND event_id=? AND "
-                    "market=? AND side=?", (tier, s["game_date"], s["event_id"], s["market"], s["side"]))
-    con.commit()
-
+    tiers = ("BEST", "CONSIDER", "AVOID") if show_all else ("BEST",)
     w = 100
     print("\n" + "=" * w)
-    print(f"PICKS BOARD — {game_date}   ({len(grows) // 2} game lines, {len(preds)} prop lines checked)".center(w))
+    print(f"GOOD PICKS — {game_date}   ({n_games} games, {n_props} prop lines checked)".center(w))
     print("=" * w)
-
-    def table(title, rows):
-        print(f"\n{title}")
+    for tier in tiers:
+        rows = [e for e in board if e["tier"] == tier]
+        print(f"\n{tier}" + ("  (+5% EV or better, no red flags)" if tier == "BEST" else ""))
         if not rows:
-            print("   (none)")
-            return
-        print(f"   {'PLAYER / GAME':<24}{'PICK':<20}{'BEST PRICE':<21}{'MODEL':>6}{'MKT':>6}{'EDGE':>6}")
-        for e in sorted(rows, key=lambda e: e["edge"], reverse=True):
+            print("   (none today — passing is a good pick too)" if tier == "BEST" else "   (none)")
+            continue
+        print(f"   {'PLAYER / GAME':<24}{'PICK':<22}{'BEST PRICE':<21}{'WIN%':>6}{'BOOKS':>7}{'EV':>7}  RESULT")
+        for e in rows:
             price = f"{e['price']:+d} {e['book']}"[:20]
-            print(f"   {e['name'][:23]:<24}{e['pick'][:19]:<20}{price:<21}"
-                  f"{e['model']:>6.0%}{e['market']:>6.0%}{e['edge']:>6.0%}")
-            print(f"      {'' if e['matchup'] == 'game' else e['matchup'] + ': '}" + ", ".join(e["why"]))
+            print(f"   {e['name'][:23]:<24}{e['pick'][:21]:<22}{price:<21}"
+                  f"{e['win']:>6.0%}{e['market']:>7.0%}{e['ev']:>+7.1%}  {e['result']}")
+            print(f"      {e['matchup']}: " + "; ".join(e["why"]))
             for x in e["warn"]:
                 print(f"      ! {x}")
-
-    table("GAME LINES — BEST", [e for e in game_entries if e["tier"] == "BEST"])
-    table("GAME LINES — CONSIDER", [e for e in game_entries if e["tier"] == "CONSIDER"])
-    table("PLAYER PROPS — BEST  (edge 7%+, fair price, no red flags)",
-          [e for e in entries if e["tier"] == "BEST"])
-    table("PLAYER PROPS — CONSIDER  (smaller edge or one warning)",
-          [e for e in entries if e["tier"] == "CONSIDER"])
-    table("PLAYER PROPS — AVOID  (model disagrees, but its data is likely stale)",
-          [e for e in entries if e["tier"] == "AVOID"])
+    hidden = sum(1 for e in board if e["tier"] in ("CONSIDER", "AVOID"))
     print("\n" + "-" * w)
-    print(" MODEL / MKT = chance this pick wins (model vs. sportsbooks, vig removed). EDGE = difference.")
-    print(" Every pick is logged and graded automatically; the scoreboard shows each tier's record.")
+    print(" WIN% = model blended with the books. BOOKS = sportsbooks' chance (vig removed).")
+    print(" EV = expected profit per $1 at that price. Every line is graded automatically.")
+    if not show_all and hidden:
+        print(f" {hidden} weaker picks hidden. See them: python daily.py picks {game_date} all")
     print("-" * w)
 
 
 # ======================= optional commands =======================
 def cmd_picks():
-    show_board(connect(), sys.argv[2] if len(sys.argv) > 2 else today())
+    args = sys.argv[2:]
+    day = next((a for a in args if a[:2] == "20"), today())
+    show_board(connect(), day, show_all="all" in args)
+
+
+def cmd_credits():
+    from budget import credits_left, daily_budget, days_until_reset, reset_date
+    from ingest import check_credits
+    con = connect()
+    try:
+        check_credits()   # free
+    except Exception as e:
+        print(f"(couldn't check online: {e}; showing last known)")
+    print(f"Credits left:   {credits_left(con)}")
+    print(f"Resets:         {reset_date():%B} 1 ({days_until_reset()} days incl. today)")
+    print(f"Today's budget: {daily_budget(con)}")
 
 
 def cmd_backtest():
@@ -371,7 +316,8 @@ def cmd_status():
     print(f"Credits left: {get_meta(con, 'credits_left', 'unknown')}")
 
 
-COMMANDS = {"picks": cmd_picks, "report": cmd_picks, "backtest": cmd_backtest, "status": cmd_status}
+COMMANDS = {"picks": cmd_picks, "report": cmd_picks, "backtest": cmd_backtest, "status": cmd_status,
+            "credits": cmd_credits}
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in COMMANDS:

@@ -7,15 +7,17 @@ A season-long NBA data pipeline and prediction system. It collects box scores, i
 - **Data warehouse (SQLite):** multi-season player box scores, game-line and player-prop odds snapshots, daily injury reports, predictions, and graded results
 - **Odds collection:** moneylines, spreads, totals, and player props from DraftKings, FanDuel, BetMGM, BetRivers, betPARX, and theScore Bet via [The Odds API](https://the-odds-api.com/), converted to vig-free probabilities
 - **Player prop model:** projected minutes × per-minute rates weighted toward the current season, adjusted for what the opponent allows and for teammates newly ruled out; threes use attempts × shrunk 3P%; negative binomial probabilities for every market
-- **Game model:** margin-of-victory Elo for moneyline and spread, recent scoring/allowing for totals
-- **Picks board:** BEST / CONSIDER / AVOID tiers with reasons and automatic red flags (role changes, early-season data, injury status, expensive prices)
+- **Game model:** margin-of-victory Elo for moneyline and spread, back-to-back rest adjustment (backtest reports whether it helps), recent scoring/allowing for totals
+- **Good picks only:** each line's win chance blends the model with the market, weighted by how sharp the model has actually been in that market (re-learned from every graded line). Picks are ranked by expected value at the best PA price, capped at the top 5, one per player, with red flags (role changes, early-season data, back-to-backs, expensive prices, one-book lines)
+- **Credit budget:** spreads the free plan's 500 monthly credits (reset on the 1st) across the month, spends them first on games with injury news (found with free data), and never re-buys lines pulled in the last few hours
+- **Desktop app:** tkinter window with picks, record, injuries and a pull-lines planner
 - **Backtesting:** day-by-day replay of past seasons using only prior information; Brier score and calibration per market
 - **Grading:** every pick scored against the box score and the market; record and ROI tracked per tier
 - API keys kept out of source code via environment variables
 
 ## Tech
 
-Python · SQLite · REST APIs · pandas · nba_api · requests
+Python · SQLite · REST APIs · pandas · nba_api · requests · tkinter
 
 ## Setup
 
@@ -30,19 +32,30 @@ python daily.py backtest    # test the threes model on history
 
 ## Usage
 
-Run it whenever you like; it catches up on everything since the last run.
+**Desktop app** (double-click `NBA Picks.bat` on Windows or `NBA Picks.command` on Mac, or run):
 
 ```bash
-python daily.py
+python app.py
 ```
 
-Each run (free): refreshes box scores for every missed game, grades all pending predictions, shows the biggest scoring and three-point nights you missed, and updates the injury report. It then asks whether you're betting today and shows the credit cost before spending anything: 3 credits for game lines on every game, plus 1 per prop market per game you pick (choose markets in `config.py`).
+1. **Update (free)** refreshes box scores, grades past picks and pulls the injury report.
+2. **Pull today's lines…** shows today's credit budget and pre-ticks the games worth spending on (a regular ruled out = props most likely mispriced). Untick or tick games and watch the cost update.
+3. The **Picks** tab shows only BEST picks; tick *Show LEAN* / *Show AVOID* for the rest. Click a pick for why the model likes it and its red flags. ◀ ▶ browse past days with results.
+4. The **Record** tab shows each tier's record and how sharp the model is vs the books per market.
+
+**Command line** still works the same way:
 
 ```bash
-python daily.py report [date]   # re-show a day's predictions
-python daily.py backtest        # grade the model on past seasons
-python daily.py status          # database summary
+python daily.py                     # catch up, then plan and pull within budget
+python daily.py picks [date] [all]  # show good picks again (add "all" for every tier)
+python daily.py credits             # credit balance and today's budget (free)
+python daily.py backtest            # grade the models on past seasons
+python daily.py status              # database summary
 ```
+
+### Credits (The Odds API free plan)
+
+500 credits a month, reset on the 1st. Game lines for every game cost 3 credits; props cost 1 credit per market per game. Fewer markets in `PULL_PROP_MARKETS` (default: threes and points) means more games per month. The daily budget spreads what's left until the reset, and lines pulled within a few hours are reused instead of re-bought.
 
 ## Roadmap
 
@@ -53,7 +66,10 @@ python daily.py status          # database summary
 - [x] Game-line model (moneyline, spread, total)
 - [x] Tiered picks board
 - [x] Automatic grading vs. results and market
-- [ ] Rest days / back-to-backs and pace in the model
+- [x] Rest days / back-to-backs
+- [x] Market-blended win chance with learned trust, EV ranking, credit budget planner
+- [x] Desktop GUI (tkinter)
+- [ ] Pace in the model; closing-line value (CLV) tracking
 - [ ] LLM parsing of injury and lineup news
 - [ ] FastAPI service + play-money odds website, deployed
 

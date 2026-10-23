@@ -220,7 +220,8 @@ def predict_props(con, game_date, season=CURRENT_SEASON):
         grouped[k].append((r["book"], r["side"], r["price"]))
         meta[k] = r
 
-    players, opp_cache, inj_cache, out = {}, {}, {}, []
+    from budget import team_b2b
+    players, opp_cache, inj_cache, b2b_cache, out = {}, {}, {}, {}, []
     for (key, market, line), prices in grouped.items():
         m, cfg = meta[(key, market, line)], PROP_MARKETS[market]
         if key not in players:
@@ -230,6 +231,8 @@ def predict_props(con, game_date, season=CURRENT_SEASON):
         if team not in (home, away):
             continue
         opp = away if team == home else home
+        if team not in b2b_cache:
+            b2b_cache[team] = team_b2b(con, team, game_date)
         status = own_status(con, key, game_date)
         if status.lower() in OUT_STATUSES:
             continue
@@ -277,6 +280,7 @@ def predict_props(con, game_date, season=CURRENT_SEASON):
             "best_under_book": best["Under"][1] if best["Under"] else None,
             "notes": "; ".join(notes), "created_utc": m["snapshot_utc"],
             "cur_games": cur["games"], "role_change": round(role, 3) if role is not None else None,
+            "b2b": int(b2b_cache[team]),
         }
         con.execute("INSERT OR REPLACE INTO predictions (" + ",".join(rec) + ") VALUES (" +
                     ",".join("?" * len(rec)) + ")", list(rec.values()))

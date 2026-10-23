@@ -18,12 +18,20 @@ CURRENT_SEASON = 2026          # start year of the current season
 # ---------- Sportsbooks licensed in Pennsylvania (The Odds API keys) ----------
 PA_BOOKS = "draftkings,fanduel,betmgm,betrivers,betparx,espnbet,williamhill_us,fanatics"
 
+# ---------- Credit budget (The Odds API free plan) ----------
+# Cost = markets x regions. Our 8 books count as 1 region, so:
+#   game lines (moneyline + spread + total, ALL games) = 3 credits
+#   player props = 1 credit per market per game
+# Free calls (0 credits): the list of today's games, and the credit balance check.
+MONTHLY_CREDITS = 500     # free plan; resets on the 1st of every month
+CREDIT_RESERVE = 15       # never plan to spend below this
+PROP_REFRESH_HOURS = 4    # a game's props pulled within this many hours are reused, not re-bought
+LINES_REFRESH_HOURS = 3   # same for game lines
+
 # ---------- Which picks to pull (each prop market = 1 credit per game) ----------
-# Remove markets you don't care about to save credits.
-PULL_PROP_MARKETS = [
-    "player_points", "player_rebounds", "player_assists",
-    "player_threes", "player_points_rebounds_assists",
-]
+# Fewer markets = more games per month. Threes and points are where the model is
+# strongest; add others back once the Record tab shows they earn their credits.
+PULL_PROP_MARKETS = ["player_threes", "player_points"]
 PULL_GAME_LINES = True   # moneyline + spread + total for ALL of today's games = 3 credits
 
 # Each prop market: which box-score stats it adds up, and its "randomness" (NB r; lower = streakier).
@@ -50,7 +58,6 @@ OPP_WINDOW = 15         # opponent's last N games used for "allowed" stats
 OPP_WEIGHT = 0.5        # 0 = ignore opponent, 1 = fully trust the opponent ratio
 INJURY_SHARE = 0.8      # share of an injured teammate's production that gets redistributed
 NB_DISPERSION = 12.0    # threes "r" (kept for the threes backtest)
-LEAN_THRESHOLD = 0.05   # a "lean" = model and market disagree by at least 5%
 
 # ---------- Game model settings ----------
 ELO_K = 20
@@ -60,12 +67,23 @@ ELO_PER_POINT = 28      # ~28 Elo points = 1 point of margin
 MARGIN_SD = 12.5        # how much final margins vary around the prediction
 TOTAL_SD = 18.0         # how much final totals vary around the prediction
 TEAM_WINDOW = 15        # recent games used for team scoring/allowing
+REST_B2B_POINTS = 1.5   # a team on the 2nd night of a back-to-back loses ~this much margin
 
-# ---------- Picks board tiers ----------
-BEST_EDGE = 0.07        # BEST: model beats market by 7%+ ...
-BEST_MIN_PRICE = -160   # ... at a price no worse than -160 ...
-BEST_MIN_GAMES = 2      # ... with at least this many games this season
-CONSIDER_EDGE = 0.04    # CONSIDER: 4%+ edge that doesn't meet every BEST rule
+# ---------- Picks: how "good" is decided ----------
+# The sportsbooks are usually right. A big gap between model and market is more often a
+# model blind spot than free money, so the win chance used for picks is a blend:
+#     win% = trust x model + (1 - trust) x market
+# "trust" starts at MODEL_TRUST and is re-learned per market from your graded lines
+# (every line the model checked counts, not just picks), so it improves as data grows.
+MODEL_TRUST = 0.5
+TRUST_PRIOR_LINES = 300  # graded lines needed before the learned trust outweighs the start
+# A pick is judged by expected value at the best PA price: EV = win% x payout - lose%.
+BEST_EV = 0.05          # GOOD pick: +5% EV or better, no red flags
+CONSIDER_EV = 0.025     # LEAN: +2.5% EV, or a GOOD pick with one red flag (hidden by default)
+BEST_MIN_PRICE = -160   # pricier than this is a red flag
+BEST_MIN_GAMES = 2      # fewer games this season than this is a red flag
+MAX_PICKS_PER_PLAYER = 1  # Over points + Over PRA on the same player is one bet, not two
+MAX_BEST_PICKS = 5      # only the top few by EV stay BEST; the rest drop to CONSIDER
 ROLE_CHANGE_FLAG = 0.20 # stat rate per minute up/down 20%+ vs last season = role changed
 
 # ---------- Names ----------

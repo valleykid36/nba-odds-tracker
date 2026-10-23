@@ -3,21 +3,23 @@ ingest.py — everything that pulls data INTO nba.db.
 
   update_player_games(seasons)  NBA.com box scores (free, via nba_api)
   update_injuries()             ESPN injury report (free)
-  update_odds()                 moneyline/spread/total, all games (3 credits)
-  todays_events()               today's games (free)
-  update_props(event, markets)  player props for one game (1 credit per market)
+  update_odds()                 moneyline/spread/total, all games (3 credits; skipped if fresh)
+  todays_events()               today's games (free, also refreshes the credit balance)
+  check_credits()               credit balance (free)
+  update_props(event, markets)  player props for one game (1 credit per market; fresh markets skipped)
   import_csvs()                 one-time import of your existing CSV files
 """
 
 import csv
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
 
-from config import ET, PA_BOOKS, SEASONS, implied, player_key, team_abbr
+from config import (ET, LINES_REFRESH_HOURS, PA_BOOKS, PROP_REFRESH_HOURS, SEASONS, implied,
+                    player_key, team_abbr)
 from db import connect, set_meta
 
 load_dotenv()
@@ -27,12 +29,41 @@ ESPN_INJURIES = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/in
 
 
 def remember_credits(resp):
+    """Every Odds API response carries the balance in its headers; save it."""
     left = resp.headers.get("x-requests-remaining")
     if left is not None:
         con = connect()
-        set_meta(con, "credits_left", left)
+        set_meta(con, "credits_left", int(float(left)))
+        set_meta(con, "credits_month", datetime.now(ET).strftime("%Y-%m"))
+        last = resp.headers.get("x-requests-last")
+        if last is not None:
+            set_meta(con, "credits_last_call", int(float(last)))
         con.close()
     return left
+
+
+def check_credits():
+    """Free: the sports list costs 0 credits and its headers show the balance."""
+    resp = requests.get("https://api.the-odds-api.com/v4/sports", params={"apiKey": ODDS_KEY},
+                        timeout=15)
+    resp.raise_for_status()
+    return remember_credits(resp)
+
+
+def fresh_since(hours):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
+
+
+def lines_are_fresh(con, game_date):
+    r = con.execute("SELECT MAX(snapshot_utc) FROM game_lines WHERE game_date=?", (game_date,)).fetchone()
+    return bool(r[0]) and r[0] >= fresh_since(LINES_REFRESH_HOURS)
+
+
+def fresh_prop_markets(con, event_id):
+    """Prop markets for this game already pulled recently (re-pulling them would waste credits)."""
+    return {r[0] for r in con.execute(
+        "SELECT DISTINCT market FROM prop_snapshots WHERE event_id=? AND snapshot_utc>=?",
+        (event_id, fresh_since(PROP_REFRESH_HOURS)))}
 
 
 def now_utc():
@@ -143,8 +174,16 @@ def update_injuries():
 
 
 # ---------------- Game lines: moneyline, spread, total (The Odds API) ----------------
-def update_odds():
-    """All of today's games, 3 markets = 3 credits."""
+def update_odds(force=False):
+    """All of today's games, 3 markets = 3 credits. Skipped if pulled in the last few hours."""
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    if not force:
+        con = connect()
+        fresh = lines_are_fresh(con, today)
+        con.close()
+        if fresh:
+            print(f"   game lines: already pulled in the last {LINES_REFRESH_HOURS}h, reusing (0 credits)")
+            return 0
     resp = requests.get(f"{ODDS_BASE}/odds/", timeout=15, params={
         "apiKey": ODDS_KEY, "bookmakers": PA_BOOKS, "markets": "h2h,spreads,totals",
         "oddsFormat": "american"})
@@ -172,20 +211,33 @@ def update_odds():
     con.commit()
     con.close()
     print(f"   game lines: {len(line_rows)} prices saved  [credits left: {remember_credits(resp)}]")
+    return int(float(resp.headers.get("x-requests-last", 3)))
 
 
 # ---------------- Player props (The Odds API) ----------------
 def todays_events():
     resp = requests.get(f"{ODDS_BASE}/events", params={"apiKey": ODDS_KEY}, timeout=15)  # free
     resp.raise_for_status()
+    remember_credits(resp)
     today = datetime.now(ET).date()
     out = [(to_et(e["commence_time"]), e) for e in resp.json()]
     return sorted([x for x in out if x[0].date() == today and x[0] > datetime.now(ET)],
                   key=lambda x: x[0])
 
 
-def update_props(event, markets=("player_threes",)):
-    """One game, all requested prop markets in one call. Costs 1 credit per market returned."""
+def update_props(event, markets=("player_threes",), force=False):
+    """One game, all requested prop markets in one call. Costs 1 credit per market returned.
+    Markets already pulled for this game in the last few hours are skipped. Returns credits used."""
+    if not force:
+        con = connect()
+        have = fresh_prop_markets(con, event["id"])
+        con.close()
+        skipped = [m for m in markets if m in have]
+        markets = [m for m in markets if m not in have]
+        if skipped:
+            print(f"   props: reusing {len(skipped)} market(s) pulled in the last {PROP_REFRESH_HOURS}h")
+        if not markets:
+            return 0
     resp = requests.get(f"{ODDS_BASE}/events/{event['id']}/odds", timeout=20, params={
         "apiKey": ODDS_KEY, "bookmakers": PA_BOOKS, "markets": ",".join(markets),
         "oddsFormat": "american"})
@@ -204,7 +256,7 @@ def update_props(event, markets=("player_threes",)):
     con.commit()
     con.close()
     print(f"   props: {len(rows)} prices saved  [credits left: {remember_credits(resp)}]")
-    return snap
+    return int(float(resp.headers.get("x-requests-last", len(markets))))
 
 
 # ---------------- One-time import of existing CSVs ----------------
