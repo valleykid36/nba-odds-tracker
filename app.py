@@ -39,7 +39,8 @@ elif sys.platform.startswith("win"):
     FONT = "Segoe UI"
 else:
     FONT = "DejaVu Sans"
-TIER_TEXT = {"BEST": "BEST", "CONSIDER": "LEAN", "AVOID": "AVOID"}
+from config import PICK_MODE
+TIER_TEXT = {"BEST": "TOP" if PICK_MODE == "confidence" else "BEST", "CONSIDER": "LEAN", "AVOID": "AVOID"}
 
 
 def today_str():
@@ -197,8 +198,8 @@ class App(tk.Tk):
         pane.pack(fill="both", expand=True)
         wrap, self.picks_tree = self._tree(pane, [
             ("tier", "TIER", 64, "w"), ("pick", "PICK", 170, "w"), ("who", "PLAYER / GAME", 170, "w"),
-            ("price", "PRICE", 64, "e"), ("book", "BOOK", 100, "w"), ("win", "WIN %", 64, "e"),
-            ("mkt", "BOOKS %", 78, "e"), ("ev", "EV", 70, "e"), ("res", "RESULT", 72, "center")])
+            ("price", "PRICE", 64, "e"), ("book", "BOOK", 100, "w"), ("win", "HIT %", 64, "e"),
+            ("mkt", "BOOKS %", 78, "e"), ("ev", "FACTORS", 74, "center"), ("res", "RESULT", 72, "center")])
         wrap.pack(side="left", fill="both", expand=True)
         self.picks_tree.bind("<<TreeviewSelect>>", self.show_detail)
 
@@ -417,11 +418,13 @@ class App(tk.Tk):
             | ({"AVOID"} if self.show_avoid.get() else set())
         self.visible = [e for e in self.board if e["tier"] in tiers]
         order = {"BEST": 0, "CONSIDER": 1, "AVOID": 2}
-        self.visible.sort(key=lambda e: (order[e["tier"]], -e["ev"]))
+        from picks import rank_key
+        self.visible.sort(key=rank_key, reverse=True)          # most likely to hit first...
+        self.visible.sort(key=lambda e: order[e["tier"]])      # ...within each tier
         for i, e in enumerate(self.visible):
             t.insert("", "end", iid=str(i), tags=(e["tier"],), values=(
                 TIER_TEXT[e["tier"]], e["pick"], e["name"], f"{e['price']:+d}", e["book"],
-                f"{e['win']:.0%}", f"{e['market']:.0%}", f"{e['ev']:+.1%}",
+                f"{e['win']:.0%}", f"{e['market']:.0%}", f"{e['n_ok']}/{len(e['signals'])}",
                 {"W": "✓ W", "L": "✗ L", "P": "push", "DNP": "DNP"}.get(e["result"], "")))
         best = sum(1 for e in self.board if e["tier"] == "BEST")
         hidden = len(self.board) - len(self.visible)
@@ -429,7 +432,7 @@ class App(tk.Tk):
             msg = "No lines pulled for this day." + (
                 "  Click “Pull today's lines…”" if self.day == datetime.now(ET).date() else "")
         else:
-            msg = (f"{best} BEST pick{'s' * (best != 1)}"
+            msg = (f"{best} {TIER_TEXT['BEST']} pick{'s' * (best != 1)}"
                    + (" — passing today is a fine pick too" if not best else "")
                    + f"   ·   {self.n_games} games, {self.n_props} prop lines checked"
                    + (f"   ·   {hidden} weaker hidden" if hidden else ""))
@@ -448,13 +451,14 @@ class App(tk.Tk):
             (e["pick"] + "\n", "h"),
             (f"{e['name']}  ·  {e['matchup']}\n", "sub"),
             (f"{e['price']:+d} at {e['book']}\n\n", "sub"),
-            ("WIN CHANCE\n", "label"),
+            ("CHANCE TO HIT\n", "label"),
             (f"{e['win']:.0%}  (model {e['model']:.0%}, books {e['market']:.0%}, "
              f"trusting model {e['trust']:.0%})\n", ""),
-            (f"EV {e['ev']:+.1%} per $1\n\n", "good" if e["ev"] > 0 else "warn"),
-            ("WHY\n", "label"),
+            (f"EV {e['ev']:+.1%} per $1 at this price\n\n", "good" if e["ev"] >= 0 else "warn"),
+            (f"FACTORS  {e['n_ok']} of {len(e['signals'])} agree\n", "label"),
         ]
-        parts += [(f"•  {w}\n", "") for w in e["why"]]
+        parts += [(f"{'✓' if s['ok'] else '✗'}  {s['text']}\n", "good" if s["ok"] else "sub")
+                  for s in e["signals"]]
         if e["warn"]:
             parts.append(("\nRED FLAGS\n", "label"))
             parts += [(f"!  {w}\n", "warn") for w in e["warn"]]

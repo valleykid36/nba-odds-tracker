@@ -8,7 +8,7 @@ A season-long NBA data pipeline and prediction system. It collects box scores, i
 - **Odds collection:** moneylines, spreads, totals, and player props from DraftKings, FanDuel, BetMGM, BetRivers, betPARX, and theScore Bet via [The Odds API](https://the-odds-api.com/), converted to vig-free probabilities
 - **Player prop model:** projected minutes × per-minute rates weighted toward the current season, adjusted for what the opponent allows and for teammates newly ruled out; threes use attempts × shrunk 3P%; negative binomial probabilities for every market
 - **Game model:** margin-of-victory Elo for moneyline and spread, back-to-back rest adjustment (backtest reports whether it helps), recent scoring/allowing for totals
-- **Good picks only:** each line's win chance blends the model with the market, weighted by how sharp the model has actually been in that market (re-learned from every graded line). Picks are ranked by expected value at the best PA price, capped at the top 5, one per player, with red flags (role changes, early-season data, back-to-backs, expensive prices, one-book lines)
+- **Picks most likely to hit:** each line's chance to hit blends the model with the market, weighted by how sharp the model has actually been in that market (re-learned from every graded line). A pick needs the model and the sportsbooks to favor the same side, then shows a factor checklist (model projection, books, last-10-game hit rate, minutes, matchup, role/teammates out; for games: record, rest, home court). TOP plays are 60%+ to hit with most factors agreeing, no red flags, and a price that isn't overpaying. Ranked by chance to hit, top 5, one per player. (`PICK_MODE = "value"` in `config.py` switches back to EV ranking.)
 - **Credit budget:** spreads the free plan's 500 monthly credits (reset on the 1st) across the month, spends them first on games with injury news (found with free data), and never re-buys lines pulled in the last few hours
 - **Desktop app:** tkinter window with picks, record, injuries and a pull-lines planner
 - **Backtesting:** day-by-day replay of past seasons using only prior information; Brier score and calibration per market
@@ -21,14 +21,31 @@ Python · SQLite · REST APIs · pandas · nba_api · requests · tkinter
 
 ## Setup
 
+### Mac (one command)
+
+Open Terminal and paste:
+
+```bash
+git clone https://github.com/valleykid36/nba-odds-tracker.git ~/nba-odds-tracker && cd ~/nba-odds-tracker && ./setup_mac.sh
+```
+
+`setup_mac.sh` finds (or installs with Homebrew) a Python with tkinter, sets up a private `.venv`, asks for your Odds API key (saved only in `.env`), downloads the latest database snapshot, and opens the app. After that, double-click **NBA Picks.command** in Finder; it pulls the latest code each time it opens.
+
+### Windows
+
 ```bash
 git clone https://github.com/valleykid36/nba-odds-tracker.git
 cd nba-odds-tracker
 pip install -r requirements.txt
-cp .env.example .env   # Windows: copy .env.example .env, then add your API keys
+copy .env.example .env      # then add your Odds API key
 python daily.py             # first run downloads past seasons and sets up the database
-python daily.py backtest    # test the threes model on history
 ```
+
+Then double-click **NBA Picks.bat**.
+
+### Database
+
+`nba.db` (box scores, odds history, picks, record) is not in git because it changes daily. A snapshot is published as the `db-snapshot` GitHub release so a new machine starts with your full history instead of rebuilding from NBA.com. Use one machine for pulling lines on a given day so the two databases don't drift apart.
 
 ## Usage
 
@@ -40,7 +57,7 @@ python app.py
 
 1. **Update (free)** refreshes box scores, grades past picks and pulls the injury report.
 2. **Pull today's lines…** shows today's credit budget and pre-ticks the games worth spending on (a regular ruled out = props most likely mispriced). Untick or tick games and watch the cost update.
-3. The **Picks** tab shows only BEST picks; tick *Show LEAN* / *Show AVOID* for the rest. Click a pick for why the model likes it and its red flags. ◀ ▶ browse past days with results.
+3. The **Picks** tab shows only TOP picks, most likely to hit first; tick *Show LEAN* / *Show AVOID* for the rest. Click a pick for its factor checklist (✓/✗) and red flags. ◀ ▶ browse past days with results.
 4. The **Record** tab shows each tier's record and how sharp the model is vs the books per market.
 
 **Command line** still works the same way:
@@ -67,7 +84,9 @@ python daily.py status              # database summary
 - [x] Tiered picks board
 - [x] Automatic grading vs. results and market
 - [x] Rest days / back-to-backs
-- [x] Market-blended win chance with learned trust, EV ranking, credit budget planner
+- [x] Market-blended win chance with learned trust, credit budget planner
+- [x] Confidence-based picks with factor checklist (last-10 hit rate, minutes, matchup, role)
+- [x] One-command Mac setup
 - [x] Desktop GUI (tkinter)
 - [ ] Pace in the model; closing-line value (CLV) tracking
 - [ ] LLM parsing of injury and lineup news

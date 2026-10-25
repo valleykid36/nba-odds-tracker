@@ -1,0 +1,5 @@
+# Mac/Linux scripts must keep Unix line endings even when committed from Windows
+*.sh       text eol=lf
+*.command  text eol=lf
+# Windows launcher keeps Windows line endings
+*.bat      text eol=crlf

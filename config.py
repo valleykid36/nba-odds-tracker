@@ -86,6 +86,22 @@ MAX_PICKS_PER_PLAYER = 1  # Over points + Over PRA on the same player is one bet
 MAX_BEST_PICKS = 5      # only the top few by EV stay BEST; the rest drop to CONSIDER
 ROLE_CHANGE_FLAG = 0.20 # stat rate per minute up/down 20%+ vs last season = role changed
 
+# ---------- Pick mode ----------
+# "confidence": rank by the chance the pick HITS, backed by several factors agreeing.
+# "value":      the old way, rank by EV (favors long shots like a +900 moneyline).
+PICK_MODE = "confidence"
+# A pick is only considered if BOTH the model and the sportsbooks make it the likelier side.
+CONF_TOP = 0.60          # TOP play: 60%+ chance to hit (blended model + books)
+CONF_LEAN = 0.55         # LEAN: 55%+
+TOP_SIGNAL_SHARE = 0.6   # TOP play: at least 60% of its factors agree (4 of 6 for props, 3 of 5 for games)
+LEAN_SIGNAL_SHARE = 0.5  # LEAN: at least half
+TOP_MIN_EV = 0.0         # TOP plays can't be overpriced: the hit chance must justify the price
+LEAN_MIN_EV = -0.03      # LEAN plays may be a touch overpriced, not -1100 favorites that lose money even when they win
+MAX_DISAGREE = 0.18      # model and books more than 18 points apart = probably a model blind spot
+HIT_RATE_GAMES = 10      # "recent form" looks at the player's last 10 games (10+ minutes)
+HIT_RATE_NEEDED = 0.6    # ...and wants this side to have hit in 6 of them
+MIN_MINUTES_OVER = 24    # an Over needs a player projected for real minutes
+
 # ---------- Names ----------
 TEAM_ABBR = {
     "Atlanta Hawks": "ATL", "Boston Celtics": "BOS", "Brooklyn Nets": "BKN",

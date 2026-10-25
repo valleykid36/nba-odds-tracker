@@ -248,29 +248,34 @@ def show_board(con, game_date, show_all=False):
     if not n_props and not n_games:
         print(f"No lines for {game_date}. Run daily.py (or app.py) and pull lines.")
         return
+    from config import PICK_MODE
     tiers = ("BEST", "CONSIDER", "AVOID") if show_all else ("BEST",)
+    names = {"BEST": "TOP" if PICK_MODE == "confidence" else "BEST", "CONSIDER": "LEAN", "AVOID": "AVOID"}
     w = 100
     print("\n" + "=" * w)
-    print(f"GOOD PICKS — {game_date}   ({n_games} games, {n_props} prop lines checked)".center(w))
+    print(f"PICKS — {game_date}   ({n_games} games, {n_props} prop lines checked)".center(w))
     print("=" * w)
     for tier in tiers:
         rows = [e for e in board if e["tier"] == tier]
-        print(f"\n{tier}" + ("  (+5% EV or better, no red flags)" if tier == "BEST" else ""))
+        print(f"\n{names[tier]}" + ("  (60%+ to hit, most factors agree, no red flags)"
+                                    if tier == "BEST" and PICK_MODE == "confidence" else
+                                    "  (+5% EV or better, no red flags)" if tier == "BEST" else ""))
         if not rows:
             print("   (none today — passing is a good pick too)" if tier == "BEST" else "   (none)")
             continue
-        print(f"   {'PLAYER / GAME':<24}{'PICK':<22}{'BEST PRICE':<21}{'WIN%':>6}{'BOOKS':>7}{'EV':>7}  RESULT")
+        print(f"   {'PLAYER / GAME':<24}{'PICK':<22}{'BEST PRICE':<21}{'HIT%':>6}{'BOOKS':>7}{'FACTORS':>9}  RESULT")
         for e in rows:
             price = f"{e['price']:+d} {e['book']}"[:20]
             print(f"   {e['name'][:23]:<24}{e['pick'][:21]:<22}{price:<21}"
-                  f"{e['win']:>6.0%}{e['market']:>7.0%}{e['ev']:>+7.1%}  {e['result']}")
-            print(f"      {e['matchup']}: " + "; ".join(e["why"]))
+                  f"{e['win']:>6.0%}{e['market']:>7.0%}{e['n_ok']:>6}/{len(e['signals'])}  {e['result']}")
+            for s in e["signals"]:
+                print(f"      {'+' if s['ok'] else '-'} {s['text']}")
             for x in e["warn"]:
                 print(f"      ! {x}")
     hidden = sum(1 for e in board if e["tier"] in ("CONSIDER", "AVOID"))
     print("\n" + "-" * w)
-    print(" WIN% = model blended with the books. BOOKS = sportsbooks' chance (vig removed).")
-    print(" EV = expected profit per $1 at that price. Every line is graded automatically.")
+    print(" HIT% = chance to hit (model blended with the books). BOOKS = sportsbooks' chance (vig removed).")
+    print(" FACTORS = how many checks agree with the pick. Every line is graded automatically.")
     if not show_all and hidden:
         print(f" {hidden} weaker picks hidden. See them: python daily.py picks {game_date} all")
     print("-" * w)
