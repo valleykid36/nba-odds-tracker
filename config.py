@@ -9,6 +9,16 @@ from zoneinfo import ZoneInfo
 ET = ZoneInfo("America/New_York")
 DB_FILE = "nba.db"
 
+# NBA.com's CDN (Akamai) returns 403 to requests that don't look like a browser.
+# A custom User-Agent or an Origin header on a plain GET is enough to get blocked.
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nba.com/",
+}
+
 # ---------- Seasons ----------
 # NBA.com labels. The LAST one is treated as the current season.
 SEASONS = ["2022-23", "2023-24", "2024-25", "2025-26", "2026-27"]

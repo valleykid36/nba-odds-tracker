@@ -20,10 +20,10 @@ from datetime import datetime, timedelta
 
 import requests
 
-from config import ET, TEAM_ABBR, player_key, team_abbr
+from config import BROWSER_HEADERS, ET, TEAM_ABBR, player_key, team_abbr
 
 BASE = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_{}.pdf"
-HEADERS = {"User-Agent": "Mozilla/5.0 (nba-odds-tracker; personal research)"}
+HEADERS = {**BROWSER_HEADERS, "Accept": "application/pdf,*/*"}   # same CDN family as live scores
 STATUSES = ("Out", "Doubtful", "Questionable", "Probable", "Available")
 LOOK_BACK_HOURS = 30      # off days have no report; yesterday's last one is still useful
 

@@ -11,18 +11,17 @@ These are the same JSON files NBA.com's own scoreboard uses; they are public and
 
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
-from config import CURRENT_SEASON, player_key
+from config import BROWSER_HEADERS, CURRENT_SEASON, ET, player_key
 from db import connect
 
 SCOREBOARD = "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json"
 BOXSCORE = "https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{}.json"
-HEADERS = {"User-Agent": "Mozilla/5.0 (nba-odds-tracker; personal research)",
-           "Referer": "https://www.nba.com/", "Origin": "https://www.nba.com"}
 SCHEDULED, LIVE, FINAL = 1, 2, 3
+_source = {"name": None}     # which source answered last: "cdn" or "stats"
 
 
 def now_utc():
@@ -44,15 +43,80 @@ def clock(v):
 
 
 def get(url):
-    r = requests.get(url, headers=HEADERS, timeout=15)
+    r = requests.get(url, headers=BROWSER_HEADERS, timeout=15)
     r.raise_for_status()
     return r.json()
+
+
+# ---------- Fallback: stats.nba.com via nba_api (same source as the box scores that already work) ----------
+
+def _basketball_day():
+    """Today's NBA date in ET. Before 6 AM it's still last night's slate (late West Coast games)."""
+    return (datetime.now(ET) - timedelta(hours=6)).date().isoformat()
+
+
+def _stats_scoreboard():
+    from nba_api.stats.endpoints import scoreboardv3
+    raw = scoreboardv3.ScoreboardV3(game_date=_basketball_day(), timeout=30).get_dict()
+    sb = raw.get("scoreboard", {})
+    sb.setdefault("gameDate", _basketball_day())
+    return sb                          # same field names as the CDN scoreboard
+
+
+def _mmss_to_iso(v):
+    """'34:12' -> 'PT34M12.00S' so the rest of this file reads both sources the same way."""
+    m = re.match(r"(\d+):(\d+)", str(v or ""))
+    return f"PT{int(m.group(1))}M{int(m.group(2))}.00S" if m else ""
+
+
+def _stats_box(game, status):
+    """BoxScoreTraditionalV3, reshaped to look like the CDN box score."""
+    from nba_api.stats.endpoints import boxscoretraditionalv3
+    raw = boxscoretraditionalv3.BoxScoreTraditionalV3(game_id=game["gameId"], timeout=30).get_dict()
+    box = raw.get("boxScoreTraditional", {})
+    totals_match = True
+    for side in ("homeTeam", "awayTeam"):
+        pts = 0
+        for p in box.get(side, {}).get("players", []):
+            s = p.setdefault("statistics", {})
+            s["minutes"] = _mmss_to_iso(s.get("minutes"))
+            p["played"] = "1" if iso_minutes(s["minutes"]) > 0 else "0"
+            p["name"] = f"{p.get('firstName', '')} {p.get('familyName', '')}".strip()
+            pts += int(s.get("points", 0) or 0)
+        if pts != int(game[side].get("score", 0) or 0):
+            totals_match = False
+    # stats.nba.com has no "final" flag on box scores. Only call it final once the players'
+    # points add up to the final score, so a half-updated box score never gets graded.
+    box["gameStatus"] = FINAL if status == FINAL and totals_match else LIVE
+    return box
+
+
+def fetch_scoreboard(verbose=True):
+    try:
+        sb = get(SCOREBOARD).get("scoreboard", {})
+        _source["name"] = "cdn"
+        return sb
+    except requests.RequestException as e:
+        if verbose:
+            print(f"   cdn.nba.com scoreboard failed ({e}); using stats.nba.com instead")
+        _source["name"] = "stats"
+        return _stats_scoreboard()
+
+
+def fetch_box(game, status):
+    if _source["name"] == "cdn":
+        try:
+            return get(BOXSCORE.format(game["gameId"])).get("game", {})
+        except requests.HTTPError as e:
+            if e.response is None or e.response.status_code != 403:
+                raise                  # 404 = not posted yet; handled by the caller
+    return _stats_box(game, status)
 
 
 def update_live(verbose=True):
     """Refresh today's scoreboard and the box score of every started game.
     Returns (games, finished games newly saved to player_games)."""
-    sb = get(SCOREBOARD).get("scoreboard", {})
+    sb = fetch_scoreboard(verbose)
     day, games = sb.get("gameDate", ""), sb.get("games", [])
     con = connect()
     snap, newly_final = now_utc(), 0
@@ -70,7 +134,7 @@ def update_live(verbose=True):
             save_game()                    # nothing to fetch (not started, or already saved)
             continue
         try:
-            box = get(BOXSCORE.format(gid)).get("game", {})
+            box = fetch_box(g, status)
         except Exception as e:
             if verbose:
                 print(f"   {away['teamTricode']} @ {home['teamTricode']}: box score not up yet ({e})")
@@ -113,7 +177,7 @@ def update_live(verbose=True):
     if verbose:
         live = sum(1 for g in games if int(g.get("gameStatus", 1)) == LIVE)
         done = sum(1 for g in games if int(g.get("gameStatus", 1)) == FINAL)
-        print(f"   live scores ({day}): {len(games)} games, {live} in progress, {done} final"
+        print(f"   live scores ({day}, via {_source['name']}): {len(games)} games, {live} in progress, {done} final"
               + (f"; {newly_final} newly final, saved for grading" if newly_final else ""))
     return games, newly_final
 
