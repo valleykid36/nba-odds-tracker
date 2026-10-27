@@ -72,16 +72,17 @@ def _american(block, *path):
 
 
 # ---------------- fetch ----------------
-def espn_lines(day):
-    """day 'YYYY-MM-DD' -> rows for every started/finished game:
-    (game_date, espn_id, home, away, book, kind, market, side, point, price)."""
+def espn_lines(day, pregame=False):
+    """day 'YYYY-MM-DD' -> rows (game_date, espn_id, home, away, book, kind, market, side, point, price).
+    Started/finished games: kind 'open' and 'close'.
+    pregame=True also includes games not started yet: kind 'open' and 'current' (for line movement)."""
     sb = requests.get(SCOREBOARD, params={"dates": day.replace("-", "")},
                       headers=BROWSER_HEADERS, timeout=20).json()
     rows = []
     for ev in sb.get("events", []):
         comp = ev["competitions"][0]
         state = comp.get("status", ev.get("status", {})).get("type", {}).get("state")
-        if state not in ("in", "post"):
+        if state not in ("in", "post") and not (pregame and state == "pre"):
             continue                       # no closing line until the game starts
         teams = {c["homeAway"]: team_abbr(c["team"].get("displayName", "")) for c in comp["competitors"]}
         try:
@@ -94,7 +95,7 @@ def espn_lines(day):
         item = next((i for i in items if str(i.get("provider", {}).get("id")) == PREFERRED_BOOK), items[0])
         book = item.get("provider", {}).get("name", "ESPN")
         base = (day, ev["id"], teams["home"], teams["away"], book)
-        for kind in ("open", "close"):
+        for kind in (("open", "close") if state in ("in", "post") else ("open", "current")):
             for side in ("home", "away"):
                 t = item.get(f"{side}TeamOdds", {}).get(kind, {})
                 ml = _american(t, "moneyLine")
@@ -117,6 +118,54 @@ def save_lines(con, rows):
     con.executemany("INSERT OR REPLACE INTO espn_lines VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     [(*r, snap) for r in rows])
     con.commit()
+
+
+def refresh_today(con=None, verbose=True):
+    """Free. Today's open + current lines for games not started yet (line movement before tip)."""
+    own = con is None
+    con = con or connect()
+    day = datetime.now(ET).date().isoformat()
+    try:
+        rows = espn_lines(day, pregame=True)
+        save_lines(con, rows)
+        if verbose:
+            games = len({r[1] for r in rows})
+            print(f"   line movement (ESPN, free): open + current lines for {games} game(s)")
+    except (requests.RequestException, ValueError) as e:
+        if verbose:
+            print(f"   line movement: ESPN unavailable ({e})")
+    if own:
+        con.close()
+
+
+def movement(con, day, home, away):
+    """{(market, side): move toward that side since the open}, from ESPN (DraftKings).
+    spreads/totals: points (+1.5 = the line moved 1.5 points in this side's favor)
+    h2h: no-vig win chance (+0.03 = books now give this side 3% more)."""
+    latest = {}
+    for r in con.execute("SELECT * FROM espn_lines WHERE game_date=? AND home=? AND away=? "
+                         "ORDER BY CASE kind WHEN 'open' THEN 0 WHEN 'current' THEN 1 ELSE 2 END",
+                         (day, home, away)):
+        latest.setdefault(r["kind"] if r["kind"] == "open" else "now", {})[(r["market"], r["side"])] = \
+            (r["point"], r["price"])
+    op, now = latest.get("open", {}), latest.get("now", {})
+    out = {}
+    for mk, sides in (("spreads", ("home", "away")), ("totals", ("Over", "Under")), ("h2h", ("home", "away"))):
+        a, b = sides
+        if not all(k in op and k in now for k in ((mk, a), (mk, b))):
+            continue
+        if mk == "h2h":
+            p_open = implied(op[(mk, a)][1]) / (implied(op[(mk, a)][1]) + implied(op[(mk, b)][1]))
+            p_now = implied(now[(mk, a)][1]) / (implied(now[(mk, a)][1]) + implied(now[(mk, b)][1]))
+            out[(mk, a)], out[(mk, b)] = p_now - p_open, p_open - p_now
+        elif mk == "spreads":
+            for s in sides:
+                if op[(mk, s)][0] is not None and now[(mk, s)][0] is not None:
+                    out[(mk, s)] = op[(mk, s)][0] - now[(mk, s)][0]     # -2.5 -> -4 = +1.5 toward
+        elif op[(mk, a)][0] is not None and now[(mk, a)][0] is not None:
+            d = now[(mk, a)][0] - op[(mk, a)][0]                        # total up = toward Over
+            out[(mk, "Over")], out[(mk, "Under")] = d, -d
+    return out
 
 
 # ---------------- score ----------------

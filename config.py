@@ -110,6 +110,11 @@ TOP_SIGNAL_SHARE = 0.6   # TOP play: at least 60% of its factors agree (4 of 6 f
 LEAN_SIGNAL_SHARE = 0.5  # LEAN: at least half
 TOP_MIN_EV = 0.0         # TOP plays can't be overpriced: the hit chance must justify the price
 LEAN_MIN_EV = -0.03      # LEAN plays may be a touch overpriced, not -1100 favorites that lose money even when they win
+LINE_MOVE = {"spreads": 1.0, "totals": 1.5, "h2h": 0.03}   # open -> now move that counts as real
+LINE_MOVE_FLAG = {"spreads": 2.0, "totals": 3.0, "h2h": 0.06}  # this much AGAINST a pick = red flag
+INJURY_EDGE_MIN = 20     # game picks: regular minutes missing, one team vs the other, that counts
+INJURY_FLAG_MIN = 45     # this many more minutes missing on YOUR team = red flag (model can't see it)
+INJURY_TOTAL_MIN = 50    # both teams together missing this many minutes leans Under
 MAX_DISAGREE = 0.18      # model and books more than 18 points apart = probably a model blind spot
 HIT_RATE_GAMES = 10      # "recent form" looks at the player's last 10 games (10+ minutes)
 HIT_RATE_NEEDED = 0.6    # ...and wants this side to have hit in 6 of them

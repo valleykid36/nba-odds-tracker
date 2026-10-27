@@ -93,8 +93,9 @@ def catch_up(con):
     # 3) Grade everything pending, 4) what you missed
     grade(con)
     try:
-        from clv import update_clv
+        from clv import refresh_today, update_clv
         update_clv(con)                      # closing lines for game picks (ESPN, free)
+        refresh_today(con)                   # today's open + current lines (line movement)
     except Exception as e:
         print(f"   couldn't get closing lines ({e}); will try again next update")
     if last_run:
@@ -131,6 +132,11 @@ def pull(con, chosen, lines=PULL_GAME_LINES, force=False):
     for tip, ev in chosen:
         print(f"Player props: {ev['away_team']} @ {ev['home_team']}")
         used += update_props(ev, PULL_PROP_MARKETS, force=force)
+    try:
+        from clv import refresh_today
+        refresh_today(con)                   # freshest line movement before picks are tiered
+    except Exception as e:
+        print(f"   line movement unavailable ({e})")
     predict_games(con, today())
     predict_props(con, today())
     print(f"\nCredits used this pull: {used}")

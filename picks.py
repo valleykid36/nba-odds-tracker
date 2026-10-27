@@ -9,7 +9,8 @@ How a line becomes a pick (PICK_MODE = "confidence", the default):
   3. Factors are checked one by one and shown as a checklist:
        props: model projection, books agree, recent form (last 10 games vs this line),
               minutes, matchup, role/teammates out
-       games: model, books agree, recent form, rest, home court
+       games: model, books agree, recent form, rest, home court, plus (only when there is
+              news) injuries to regulars and line movement since the open (ESPN, free)
   4. TOP  = 60%+ to hit, most factors agree, no red flags, and not overpriced.
      LEAN = 55%+ to hit and at least half the factors agree.
      AVOID = the numbers look good but something says the model is wrong
@@ -24,7 +25,8 @@ import math
 from collections import defaultdict
 
 from config import (BEST_EV, BEST_MIN_GAMES, CONF_LEAN, CONF_TOP, CONSIDER_EV,
-                    HIT_RATE_GAMES, HIT_RATE_NEEDED, LEAN_MIN_EV, LEAN_SIGNAL_SHARE, MAX_BEST_PICKS,
+                    HIT_RATE_GAMES, HIT_RATE_NEEDED, INJURY_EDGE_MIN, INJURY_FLAG_MIN,
+                    INJURY_TOTAL_MIN, LEAN_MIN_EV, LINE_MOVE, LINE_MOVE_FLAG, LEAN_SIGNAL_SHARE, MAX_BEST_PICKS,
                     MAX_DISAGREE, MAX_PICKS_PER_PLAYER, MIN_MINUTES, MIN_MINUTES_OVER,
                     MODEL_TRUST, PICK_MODE, PROP_MARKETS, ROLE_CHANGE_FLAG, TOP_MIN_EV,
                     TOP_SIGNAL_SHARE, TRUST_PRIOR_LINES, payout)
@@ -86,6 +88,23 @@ class Form:
     def __init__(self, con, game_date):
         self.con, self.date = con, game_date
         self.players, self.teams = {}, None
+        self._out, self._moves = {}, {}
+
+    def out(self, team):
+        """[(player, minutes)] regulars listed out/doubtful for this game."""
+        if team not in self._out:
+            from budget import out_regulars
+            self._out[team] = out_regulars(self.con, team, self.date)
+        return self._out[team]
+
+    def moves(self, home, away):
+        if (home, away) not in self._moves:
+            try:
+                from clv import movement
+                self._moves[(home, away)] = movement(self.con, self.date, home, away)
+            except Exception:
+                self._moves[(home, away)] = {}
+        return self._moves[(home, away)]
 
     def player_games(self, key):
         if key not in self.players:
@@ -293,6 +312,43 @@ def classify_game_side(r, other, trust, form):
         signals.append(signal(tired and r["side"] == "Under", note or "no back-to-backs"))
 
     warn = []
+
+    # ---- injuries (the game model doesn't see them; the books do) ----
+    def who(lst):
+        return ", ".join(f"{n} ({m})" for n, m in lst[:3]) + (" …" if len(lst) > 3 else "")
+    h_out, a_out = form.out(r["home"]), form.out(r["away"])
+    if team:
+        mine, theirs = (h_out, a_out) if r["side"] == "home" else (a_out, h_out)
+        m_min, t_min = sum(m for _, m in mine), sum(m for _, m in theirs)
+        if m_min or t_min:
+            signals.append(signal(t_min - m_min >= INJURY_EDGE_MIN,
+                                  "injuries: " + "; ".join(x for x in (
+                                      f"{opp} without {who(theirs)}" if theirs else "",
+                                      f"{team} without {who(mine)}" if mine else "") if x)
+                                  + f" (regular minutes out: {team} {m_min}, {opp} {t_min})"))
+        if m_min - t_min >= INJURY_FLAG_MIN:
+            warn.append(f"{team} missing {m_min - t_min} more regular minutes than {opp}; "
+                        "the game model doesn't adjust for injuries")
+    else:
+        both = sum(m for _, m in h_out + a_out)
+        if both:
+            under = r["side"] == "Under"
+            signals.append(signal(under and both >= INJURY_TOTAL_MIN,
+                                  f"injuries: {both} regular min out across both teams"
+                                  + (" (leans Under)" if both >= INJURY_TOTAL_MIN else "")))
+            if not under and both >= INJURY_TOTAL_MIN * 1.5:
+                warn.append(f"{both} regular minutes out across both teams; Over is fighting that")
+
+    # ---- line movement since the open (ESPN / DraftKings, free) ----
+    mv = form.moves(r["home"], r["away"]).get((market, r["side"]))
+    if mv is not None and abs(mv) >= LINE_MOVE[market] / 2:
+        unit = f"{abs(mv):.0%}" if market == "h2h" else f"{abs(mv):g} pts"
+        toward = mv > 0
+        signals.append(signal(toward and mv >= LINE_MOVE[market],
+                              f"line moved {unit} {'toward' if toward else 'against'} this side since the open"))
+        if -mv >= LINE_MOVE_FLAG[market]:
+            warn.append(f"market moved {unit} against this side since the open (sharp money?)")
+
     disagree = abs(r["model_prob"] - r["market_prob"])
     if disagree > MAX_DISAGREE:
         warn.append(f"model ({r['model_prob']:.0%}) and books ({r['market_prob']:.0%}) far apart: "
