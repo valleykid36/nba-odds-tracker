@@ -32,7 +32,11 @@ _HEAD = re.compile(r"^(?P<date>\d{2}/\d{2}/\d{4})\s+")
 _TIME = re.compile(r"^(?P<time>\d{1,2}:\d{2}\s*\(ET\))\s+")
 _MATCH = re.compile(r"^(?P<matchup>[A-Z]{2,3}\s*@\s*[A-Z]{2,3})\s+")
 _PLAYER = re.compile(r"^(?P<player>.+?,.+?)\s+(?P<status>" + "|".join(STATUSES) + r")\b\s*(?P<reason>.*)$")
-_SKIP = re.compile(r"^(Injury Report:|Page \d+ of \d+|Game Date\b)")
+_SKIP = re.compile(r"^(Injury ?Report:|Page ?\d+ ?of ?\d+|Game ?Date\b)")
+# pdfplumber often drops the spaces inside cells ("BrooklynNets", "NOTYETSUBMITTED"),
+# so teams are matched with spaces removed and wrapped reason lines are re-attached below.
+_TEAMS_NOSPACE = sorted(((t.replace(" ", ""), t) for t in set(TEAM_ABBR)), key=lambda x: len(x[0]), reverse=True)
+_SUFFIX = re.compile(r"(?<=[a-z])(Jr\.?|Sr\.?|III|II|IV)$")
 
 
 def report_name(t):
@@ -66,13 +70,30 @@ def _name(last_first):
     if "," not in last_first:
         return last_first.strip()
     last, first = last_first.split(",", 1)
-    return f"{first.strip()} {last.strip()}"
+    last = _SUFFIX.sub(r" \1", last.strip())          # 'JacksonJr.' -> 'Jackson Jr.'
+    return f"{first.strip()} {last}"
+
+
+def _spaced(text):
+    """'Injury/Illness-RightHamstringStrain' -> 'Injury/Illness-Right Hamstring Strain'"""
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text)
 
 
 def parse_lines(lines):
-    """Text lines from the PDF -> list of row dicts. Blank date/time/matchup/team carry down."""
+    """Text lines from the PDF -> list of row dicts. Blank date/time/matchup/team carry down.
+
+    A reason that wraps onto two lines is printed around the player's row (part above, part
+    below), so loose lines wait in `pending`: they belong to the next player if that player's
+    row has no reason of its own, otherwise to the player before.
+    """
     rows, cur = [], {"date": "", "time": "", "matchup": "", "team": ""}
-    not_submitted = []
+    not_submitted, pending = [], []
+
+    def flush_to_previous():
+        if pending and rows:
+            rows[-1]["reason"] = (rows[-1]["reason"] + " " + " ".join(pending)).strip()
+        pending.clear()
+
     for raw in lines:
         line = " ".join(raw.split())
         if not line or _SKIP.match(line):
@@ -84,24 +105,40 @@ def parse_lines(lines):
                 line = line[m.end():]
                 if key == "date":
                     cur.update(time="", matchup="", team="")
-        for t in _TEAMS:
-            if line.startswith(t + " ") or line == t:
-                cur["team"] = team_abbr(t)
-                line = line[len(t):].strip()
+        squeezed = line.replace(" ", "")
+        for short, full in _TEAMS_NOSPACE:
+            if squeezed.startswith(short):
+                cur["team"] = team_abbr(full)
+                # cut the team name off the original line, however many spaces it had
+                n = 0
+                for i, ch in enumerate(line):
+                    if ch != " ":
+                        n += 1
+                    if n == len(short):
+                        line = line[i + 1:].strip()
+                        break
                 break
-        if "NOT YET SUBMITTED" in line.upper():
+        if "NOTYETSUBMITTED" in line.upper().replace(" ", ""):
+            flush_to_previous()
             not_submitted.append(cur["team"])
             continue
         m = _PLAYER.match(line)
         if m and cur["team"]:
             name = _name(m.group("player"))
+            reason = _spaced(m.group("reason").strip())
+            if pending and not reason:
+                reason = " ".join(pending)
+                pending.clear()
+            else:
+                flush_to_previous()
             mm, dd, yy = cur["date"].split("/") if cur["date"] else ("", "", "")
             rows.append(dict(game_date=f"{yy}-{mm}-{dd}" if yy else "", game_time=cur["time"],
                              matchup=cur["matchup"], team=cur["team"], player=name,
                              player_key=player_key(name), status=m.group("status"),
-                             reason=m.group("reason").strip()))
-        elif rows and line and not _PLAYER.match(line):
-            rows[-1]["reason"] = (rows[-1]["reason"] + " " + line).strip()   # wrapped reason text
+                             reason=reason))
+        elif line:
+            pending.append(_spaced(line))     # wrapped reason text; placed when the next row arrives
+    flush_to_previous()
     return rows, not_submitted
 
 
