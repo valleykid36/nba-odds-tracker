@@ -580,15 +580,17 @@ class App(tk.Tk):
         d.configure(state="disabled")
 
     def fill_record(self, con):
+        from clv import clv_summary, describe
         from picks import learned_trust, market_label, records
         since = (datetime.now(ET).date() - timedelta(days=30)).isoformat()
-        allr, recent = records(con), records(con, since)
+        allr, recent, clv = records(con), records(con, since), clv_summary(con)
         for tier, (big, small) in self.cards.items():
             r, r30 = allr[tier], recent[tier]
             if r["w"] + r["l"]:
                 big.configure(text=f"{r['w']}-{r['l']}", fg=C["win"] if r["units"] >= 0 else C["loss"])
                 small.configure(text=f"{r['units']:+.2f} units · {r['roi']:+.1%} ROI\n"
-                                     f"last 30 days: {r30['w']}-{r30['l']}, {r30['units']:+.2f}u")
+                                     f"last 30 days: {r30['w']}-{r30['l']}, {r30['units']:+.2f}u\n"
+                                     f"{describe(clv[tier])} (game lines)")
             else:
                 big.configure(text="—", fg=C["muted"])
                 small.configure(text="no graded picks yet\n")

@@ -30,6 +30,7 @@ Other commands (optional):
     python daily.py injuries              refresh the injury list (official NBA report + ESPN, free)
     python daily.py picks [YYYY-MM-DD]    show the good picks again (free); add "all" for every tier
     python daily.py credits               credit balance and today's budget (free)
+    python daily.py clv                   closing-line value of game picks (ESPN, free)
     python daily.py backtest              test the models on past seasons (free)
     python daily.py status                what's in the database
 """
@@ -91,6 +92,11 @@ def catch_up(con):
 
     # 3) Grade everything pending, 4) what you missed
     grade(con)
+    try:
+        from clv import update_clv
+        update_clv(con)                      # closing lines for game picks (ESPN, free)
+    except Exception as e:
+        print(f"   couldn't get closing lines ({e}); will try again next update")
     if last_run:
         missed(con, last_run)
 
@@ -239,15 +245,17 @@ def grade(con, quiet=False):
 
 
 def scoreboard(con):
+    from clv import clv_summary, describe
     from picks import learned_trust, market_label, records
-    rec = records(con)
+    rec, clv = records(con), clv_summary(con)
     if not any(r["w"] + r["l"] for r in rec.values()):
         print("Scoreboard: nothing graded yet. It fills in after your first betting day.")
         return
     print("\n=== Scoreboard (1 unit per pick at the best PA price) ===")
     for tier, r in rec.items():
         if r["w"] + r["l"]:
-            print(f"   {tier:<9} {r['w']}-{r['l']}   {r['units']:+.2f} units  ({r['roi']:+.1%} ROI)")
+            print(f"   {tier:<9} {r['w']}-{r['l']}   {r['units']:+.2f} units  ({r['roi']:+.1%} ROI)"
+                  + (f"   {describe(clv[tier])} (game lines)" if clv[tier]["n"] else ""))
         else:
             print(f"   {tier:<9} no graded picks yet")
     trust = learned_trust(con)
@@ -377,7 +385,16 @@ def cmd_injuries():
     update_injuries()
 
 
-COMMANDS = {"update": cmd_update, "live": cmd_live, "injuries": cmd_injuries, "picks": cmd_picks, "report": cmd_picks, "backtest": cmd_backtest, "status": cmd_status,
+def cmd_clv():
+    from clv import clv_summary, describe, update_clv
+    con = connect()
+    update_clv(con)
+    for tier, s in clv_summary(con).items():
+        print(f"   {tier:<9} {describe(s)}")
+    con.close()
+
+
+COMMANDS = {"clv": cmd_clv, "update": cmd_update, "live": cmd_live, "injuries": cmd_injuries, "picks": cmd_picks, "report": cmd_picks, "backtest": cmd_backtest, "status": cmd_status,
             "credits": cmd_credits}
 
 if __name__ == "__main__":

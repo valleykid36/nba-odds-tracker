@@ -80,6 +80,13 @@ CREATE TABLE IF NOT EXISTS injury_history (
 CREATE INDEX IF NOT EXISTS ix_injh ON injury_history(game_date, team, player_key);
 CREATE INDEX IF NOT EXISTS ix_injh_report ON injury_history(source, report);
 
+-- DraftKings opening and closing lines from ESPN (free), for closing-line value.
+CREATE TABLE IF NOT EXISTS espn_lines (
+    game_date TEXT, espn_id TEXT, home TEXT, away TEXT, book TEXT,
+    kind TEXT, market TEXT, side TEXT, point REAL, price REAL, fetched_utc TEXT,
+    PRIMARY KEY (game_date, espn_id, kind, market, side)
+);
+
 -- Live scores from NBA.com's free scoreboard (no credits).
 CREATE TABLE IF NOT EXISTS live_games (
     game_id TEXT PRIMARY KEY, game_date TEXT, tip_utc TEXT, home TEXT, away TEXT,
@@ -132,6 +139,10 @@ NEW_COLUMNS = [  # added after the first version; older databases get them autom
     ("game_predictions", "p_blend", "REAL"),
     ("game_predictions", "ev", "REAL"),
     ("game_predictions", "rest_note", "TEXT"),
+    ("game_predictions", "close_point", "REAL"),   # closing line (ESPN / DraftKings)
+    ("game_predictions", "close_price", "REAL"),
+    ("game_predictions", "clv_pts", "REAL"),       # points better (+) or worse than the close
+    ("game_predictions", "clv_ev", "REAL"),        # value per unit if the close is the true price
     ("injuries", "source", "TEXT"),            # "NBA" (official report) or "ESPN"
 ]
 
