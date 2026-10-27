@@ -25,6 +25,9 @@ What CAN'T be caught up: odds and injuries for days you skipped (the free Odds A
 plan has no history). Box scores and grading always catch up fully.
 
 Other commands (optional):
+    python daily.py update                free catch-up only, no questions (what the scheduler runs)
+    python daily.py live                  live scores + grade finished games (free)
+    python daily.py injuries              refresh the injury list (official NBA report + ESPN, free)
     python daily.py picks [YYYY-MM-DD]    show the good picks again (free); add "all" for every tier
     python daily.py credits               credit balance and today's budget (free)
     python daily.py backtest              test the models on past seasons (free)
@@ -32,7 +35,7 @@ Other commands (optional):
 """
 
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from config import CURRENT_SEASON, ET, PROP_MARKETS, PULL_GAME_LINES, PULL_PROP_MARKETS, SEASONS
 from db import connect, get_meta, set_meta
@@ -79,6 +82,13 @@ def catch_up(con):
     after = con.execute(count, (CURRENT_SEASON,)).fetchone()[0]
     print(f"   {after - before} new games added this season ({after} total)\n")
 
+    # 2b) Today's live/finished games from NBA.com's scoreboard (free) so tonight's picks grade fast
+    try:
+        from nba_live import update_live
+        update_live()
+    except Exception as e:
+        print(f"   couldn't reach the NBA.com scoreboard ({e}); finished games grade on the next update")
+
     # 3) Grade everything pending, 4) what you missed
     grade(con)
     if last_run:
@@ -89,7 +99,17 @@ def catch_up(con):
     try:
         update_injuries()
     except Exception as e:
-        print(f"   couldn't reach ESPN ({e}); continuing without today's injuries")
+        print(f"   couldn't get injuries ({e}); continuing without today's injuries")
+
+    # 6) Team pace/ratings and player shooting splits from NBA.com (free, once a day)
+    if get_meta(con, "team_stats_date") != today():
+        print("\nUpdating team and shooting stats...")
+        try:
+            from nba_extra import update_extra
+            update_extra()
+            set_meta(con, "team_stats_date", today())
+        except Exception as e:
+            print(f"   couldn't get team stats ({e}); will try again next update")
     set_meta(con, "last_run", today())
 
 
@@ -173,12 +193,24 @@ def run():
 
 
 # ======================= grading =======================
-def grade(con):
+def grade(con, quiet=False):
     from game_model import grade_games
-    pending = con.execute("SELECT * FROM predictions WHERE actual IS NULL AND game_date<?",
+    # today's games count too: finished games come in from the live scoreboard (nba_live.py)
+    pending = con.execute("SELECT * FROM predictions WHERE actual IS NULL AND game_date<=?",
                           (today(),)).fetchall()
+    # A game only counts once it's over. NBA.com's game logs can include games still being
+    # played, so today's games wait for the live scoreboard to say Final.
+    live = {(r["game_date"], t): r["status"] for r in con.execute(
+        "SELECT game_date, home, away, status FROM live_games") for t in (r["home"], r["away"])}
+
+    def finished(day, team):
+        st = live.get((day, team))
+        return st == 3 if st is not None else day < today()
+
     done, days = 0, set()
     for p in pending:
+        if not finished(p["game_date"], p["team"]):
+            continue
         key = (p["game_date"], p["player_key"], p["market"], p["line"])
         stats = PROP_MARKETS.get(p["market"], {"stats": ["fg3m"]})["stats"]
         row = con.execute(f"SELECT {'+'.join(stats)} v FROM player_games WHERE player_key=? "
@@ -196,11 +228,14 @@ def grade(con):
         done += 1
         days.add(p["game_date"])
     con.commit()
-    games_done = grade_games(con, today())
+    tomorrow = (datetime.fromisoformat(today()) + timedelta(days=1)).strftime("%Y-%m-%d")
+    games_done = grade_games(con, tomorrow, ready=finished)      # only finished games have scores, so this is safe
     if done or games_done:
         print(f"Graded {done} prop lines and {games_done} game lines"
               + (f" from {', '.join(sorted(days))}" if days else ""))
-    scoreboard(con)
+    if not quiet:
+        scoreboard(con)
+    return done + games_done
 
 
 def scoreboard(con):
@@ -312,8 +347,8 @@ def cmd_backtest():
 
 def cmd_status():
     con = connect()
-    for t in ("player_games", "game_lines", "prop_snapshots", "injuries", "predictions",
-              "game_predictions"):
+    for t in ("player_games", "game_lines", "prop_snapshots", "injuries", "injury_history",
+              "predictions", "game_predictions", "live_games", "team_stats", "player_shooting"):
         print(f"{t:<17} {con.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0]:>9,} rows")
     r = con.execute("SELECT MIN(game_date), MAX(game_date) FROM player_games").fetchone()
     print(f"\nBox scores:   {r[0]} to {r[1]}")
@@ -321,7 +356,28 @@ def cmd_status():
     print(f"Credits left: {get_meta(con, 'credits_left', 'unknown')}")
 
 
-COMMANDS = {"picks": cmd_picks, "report": cmd_picks, "backtest": cmd_backtest, "status": cmd_status,
+def cmd_update():
+    """Free catch-up only (box scores, live scores, grading, injuries, team stats). Never spends
+    credits and never asks anything, so it is safe to run on a schedule."""
+    con = connect()
+    catch_up(con)
+    con.close()
+
+
+def cmd_live():
+    from nba_live import update_live
+    update_live()
+    con = connect()
+    grade(con)
+    con.close()
+
+
+def cmd_injuries():
+    from ingest import update_injuries
+    update_injuries()
+
+
+COMMANDS = {"update": cmd_update, "live": cmd_live, "injuries": cmd_injuries, "picks": cmd_picks, "report": cmd_picks, "backtest": cmd_backtest, "status": cmd_status,
             "credits": cmd_credits}
 
 if __name__ == "__main__":

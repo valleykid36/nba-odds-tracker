@@ -170,12 +170,15 @@ def predict_games(con, game_date):
     return out
 
 
-def grade_games(con, today):
+def grade_games(con, today, ready=None):
+    """Grade game lines dated before `today`. ready(day, home) can hold back games not over yet."""
     pending = con.execute("SELECT * FROM game_predictions WHERE result IS NULL AND game_date<?",
                           (today,)).fetchall()
     results = {(d, h): (hp, ap) for d, _, h, _, hp, ap in team_results(con)}
     n = 0
     for p in pending:
+        if ready and not ready(p["game_date"], p["home"]):
+            continue
         score = results.get((p["game_date"], p["home"]))
         if not score:
             continue

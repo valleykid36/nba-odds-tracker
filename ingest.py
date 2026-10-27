@@ -2,7 +2,7 @@
 ingest.py — everything that pulls data INTO nba.db.
 
   update_player_games(seasons)  NBA.com box scores (free, via nba_api)
-  update_injuries()             ESPN injury report (free)
+  update_injuries()             official NBA injury report + ESPN (free)
   update_odds()                 moneyline/spread/total, all games (3 credits; skipped if fresh)
   todays_events()               today's games (free, also refreshes the credit balance)
   check_credits()               credit balance (free)
@@ -149,28 +149,84 @@ def update_player_games(seasons=None):
     con.close()
 
 
-# ---------------- Injuries (ESPN) ----------------
-def update_injuries():
+# ---------------- Injuries (official NBA report + ESPN, both free) ----------------
+def espn_injuries():
     resp = requests.get(ESPN_INJURIES, timeout=20)
     resp.raise_for_status()
-    snap = now_utc()
-    today = datetime.now(ET).strftime("%Y-%m-%d")
     rows = []
     for t in resp.json().get("injuries", []):
         team = team_abbr(t.get("displayName", ""))
         for inj in t.get("injuries", []):
             name = inj.get("athlete", {}).get("displayName", "")
-            if not name:
-                continue
-            rows.append((snap, today, team, name, player_key(name), inj.get("status", ""),
-                         inj.get("shortComment", ""),
-                         (inj.get("details") or {}).get("returnDate", "")))
+            if name:
+                rows.append(dict(team=team, player=name, player_key=player_key(name),
+                                 status=inj.get("status", ""), comment=inj.get("shortComment", ""),
+                                 return_date=(inj.get("details") or {}).get("returnDate", "")))
+    return rows
+
+
+def update_injuries():
+    """Today's injury list. The NBA's official report wins for tonight's games (it's what
+    teams must file); ESPN fills in everyone else plus return dates. Every pull is also
+    kept in injury_history."""
+    from nba_injury import fetch_official
+    snap, today = now_utc(), datetime.now(ET).strftime("%Y-%m-%d")
     con = connect()
-    con.execute("DELETE FROM injuries WHERE snapshot_date = ?", (today,))  # keep latest per day
-    con.executemany("INSERT INTO injuries VALUES (?,?,?,?,?,?,?,?)", rows)
+    merged, history = {}, []
+
+    try:
+        espn = espn_injuries()
+        for r in espn:
+            merged[(r["team"], r["player_key"])] = dict(r, source="ESPN")
+            history.append((snap, snap, "ESPN", today, "", r["team"], r["player"], r["player_key"],
+                            r["status"], r["comment"]))
+        print(f"   ESPN injuries: {len(espn)} players listed")
+    except Exception as e:
+        print(f"   couldn't reach ESPN ({e}); keeping its last list")
+        for r in con.execute("SELECT * FROM injuries WHERE snapshot_date=(SELECT MAX(snapshot_date) FROM "
+                             "injuries) AND COALESCE(source, 'ESPN')='ESPN'"):
+            merged[(r["team"], r["player_key"])] = dict(
+                team=r["team"], player=r["player"], player_key=r["player_key"], status=r["status"],
+                comment=r["comment"], return_date=r["return_date"], source="ESPN")
+
+    try:
+        official, label, missing = fetch_official()
+    except Exception as e:
+        official, label, missing = [], None, []
+        print(f"   couldn't read the official NBA report ({e}); using ESPN only")
+    if label:
+        upcoming = sorted({r["game_date"] for r in official if r["game_date"] >= today})
+        night = upcoming[0] if upcoming else None
+        tonight = [r for r in official if r["game_date"] == night]
+        for r in tonight:
+            old = merged.get((r["team"], r["player_key"]), {})
+            merged[(r["team"], r["player_key"])] = dict(
+                team=r["team"], player=r["player"], player_key=r["player_key"], status=r["status"],
+                comment=r["reason"], return_date=old.get("return_date", ""), source="NBA")
+        seen = con.execute("SELECT 1 FROM injury_history WHERE source='NBA' AND report=? LIMIT 1",
+                           (label,)).fetchone()
+        if not seen:
+            history += [(label, snap, "NBA", r["game_date"], r["matchup"], r["team"], r["player"],
+                         r["player_key"], r["status"], r["reason"]) for r in official]
+        print(f"   official NBA report ({label}): {len(tonight)} players for {night or 'no upcoming games'}"
+              + (f"; not yet submitted: {', '.join(t for t in missing if t)}" if missing else ""))
+        set_meta(con, "nba_injury_report", label)
+    elif not official:
+        print("   official NBA report: none posted in the last day (normal on off days)")
+
+    if merged:
+        con.execute("DELETE FROM injuries WHERE snapshot_date = ?", (today,))  # keep latest per day
+        con.executemany(
+            "INSERT INTO injuries (snapshot_utc, snapshot_date, team, player, player_key, status, comment, "
+            "return_date, source) VALUES (?,?,?,?,?,?,?,?,?)",
+            [(snap, today, r["team"], r["player"], r["player_key"], r["status"], r["comment"],
+              r["return_date"], r["source"]) for r in merged.values()])
+    con.executemany("INSERT INTO injury_history VALUES (?,?,?,?,?,?,?,?,?,?)", history)
     con.commit()
     con.close()
-    print(f"   injuries: {len(rows)} players listed")
+    if not merged:
+        raise RuntimeError("no injury source reachable")
+    print(f"   injuries: {len(merged)} players on today's list")
 
 
 # ---------------- Game lines: moneyline, spread, total (The Odds API) ----------------

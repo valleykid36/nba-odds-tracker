@@ -70,6 +70,44 @@ CREATE TABLE IF NOT EXISTS game_predictions (
     tier TEXT, result TEXT, final TEXT,
     PRIMARY KEY (game_date, event_id, market, side)
 );
+
+-- Every injury report ever pulled (official NBA + ESPN), so you can look back at
+-- who was listed when. The 'injuries' table above is just the latest one per day.
+CREATE TABLE IF NOT EXISTS injury_history (
+    report TEXT, fetched_utc TEXT, source TEXT, game_date TEXT, matchup TEXT,
+    team TEXT, player TEXT, player_key TEXT, status TEXT, reason TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_injh ON injury_history(game_date, team, player_key);
+CREATE INDEX IF NOT EXISTS ix_injh_report ON injury_history(source, report);
+
+-- Live scores from NBA.com's free scoreboard (no credits).
+CREATE TABLE IF NOT EXISTS live_games (
+    game_id TEXT PRIMARY KEY, game_date TEXT, tip_utc TEXT, home TEXT, away TEXT,
+    home_pts INTEGER, away_pts INTEGER, status INTEGER, status_text TEXT,
+    period INTEGER, clock TEXT, updated_utc TEXT
+);
+CREATE TABLE IF NOT EXISTS live_box (
+    game_id TEXT, player_id INTEGER, game_date TEXT, player_name TEXT, player_key TEXT,
+    team TEXT, played INTEGER, min REAL, pts INTEGER, reb INTEGER, ast INTEGER,
+    stl INTEGER, blk INTEGER, fg3m INTEGER, fg3a INTEGER, updated_utc TEXT,
+    PRIMARY KEY (game_id, player_id)
+);
+CREATE INDEX IF NOT EXISTS ix_live_box ON live_box(game_date, player_key);
+
+-- Daily snapshots of NBA.com team and shooting stats (one row per day, so the
+-- model can later be tested using only what was known on each date).
+CREATE TABLE IF NOT EXISTS team_stats (
+    snapshot_date TEXT, season INTEGER, team TEXT, gp INTEGER,
+    pace REAL, off_rtg REAL, def_rtg REAL, net_rtg REAL,
+    opp_pts REAL, opp_fg3m REAL, opp_fg3a REAL, opp_fg3_pct REAL,
+    PRIMARY KEY (snapshot_date, team)
+);
+CREATE TABLE IF NOT EXISTS player_shooting (
+    snapshot_date TEXT, season INTEGER, player_key TEXT, player TEXT, team TEXT, gp INTEGER,
+    cs_fg3m REAL, cs_fg3a REAL, cs_fg3_pct REAL,
+    pu_fg3m REAL, pu_fg3a REAL, pu_fg3_pct REAL,
+    PRIMARY KEY (snapshot_date, player_key)
+);
 """
 
 
@@ -94,6 +132,7 @@ NEW_COLUMNS = [  # added after the first version; older databases get them autom
     ("game_predictions", "p_blend", "REAL"),
     ("game_predictions", "ev", "REAL"),
     ("game_predictions", "rest_note", "TEXT"),
+    ("injuries", "source", "TEXT"),            # "NBA" (official report) or "ESPN"
 ]
 
 

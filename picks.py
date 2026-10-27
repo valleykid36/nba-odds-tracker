@@ -222,6 +222,7 @@ def classify_prop(p, trust, form, side=None):
     else:
         tier = grade_tier(win, signals, warn, value, role_against or disagree > MAX_DISAGREE)
     return dict(kind="prop", tier=tier, side=side, name=p["player"] or p["player_key"], who=p["player_key"],
+                team=p["team"], opp=p["opp"], stats=cfg["stats"], line=line,
                 game=p["event_id"], matchup=f"{p['team']} vs {p['opp']}",
                 pick=f"{side} {line:g} {label}", market_key=p["market"],
                 price=price, book=book, model=model, market=market, win=win, ev=value, edge=model - market,
@@ -311,6 +312,7 @@ def classify_game_side(r, other, trust, form):
             f"{team} {pt:+g}" if market == "spreads" else
             f"{r['side']} {pt:g}" if pt is not None else f"{r['side']} total")
     return dict(kind="game", tier=tier, side=r["side"], name=f"{r['away']} @ {r['home']}",
+                home=r["home"], away=r["away"], point=pt,
                 who=None, game=r["event_id"], matchup=GAME_LABELS[market], pick=pick, market_key=market,
                 price=r["best_price"], book=r["best_book"], model=r["model_prob"],
                 market=r["market_prob"], win=win, ev=value, edge=r["model_prob"] - r["market_prob"],

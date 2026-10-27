@@ -5,6 +5,10 @@ A season-long NBA data pipeline and prediction system. It collects box scores, i
 ## Features
 
 - **Data warehouse (SQLite):** multi-season player box scores, game-line and player-prop odds snapshots, daily injury reports, predictions, and graded results
+- **Official NBA injury report:** reads the league's own PDF (posted every ~15 minutes on game days) and merges it with ESPN; the official status wins for tonight, ESPN covers long-term injuries and return dates. Every report pulled is kept in `injury_history`
+- **Live scores, free:** NBA.com's public scoreboard and box scores show each pick's progress while games are on (e.g. `↑ 2/3.5 · Q3 5:12`), and picks grade minutes after the final buzzer, without spending any Odds API credits
+- **More NBA.com data:** daily snapshots of team pace, offensive/defensive/net rating, threes allowed, and every player's catch-and-shoot vs pull-up threes, shown under each pick
+- **Runs itself:** a scheduled free update five times a day (Mac launchd / Windows Task Scheduler)
 - **Odds collection:** moneylines, spreads, totals, and player props from DraftKings, FanDuel, BetMGM, BetRivers, betPARX, and theScore Bet via [The Odds API](https://the-odds-api.com/), converted to vig-free probabilities
 - **Player prop model:** projected minutes × per-minute rates weighted toward the current season, adjusted for what the opponent allows and for teammates newly ruled out; threes use attempts × shrunk 3P%; negative binomial probabilities for every market
 - **Game model:** margin-of-victory Elo for moneyline and spread, back-to-back rest adjustment (backtest reports whether it helps), recent scoring/allowing for totals
@@ -55,7 +59,8 @@ Then double-click **NBA Picks.bat**.
 python app.py
 ```
 
-1. **Update (free)** refreshes box scores, grades past picks and pulls the injury report.
+1. **Update (free)** refreshes box scores, live scores, grades picks, pulls the official NBA injury report + ESPN, and the day's team/shooting stats.
+   **Live scores (free)** just refreshes scores and grades finished games; while games are on the app does this by itself every 2 minutes. The **Scores** tab lists every game with your picks in it.
 2. **Pull today's lines…** shows today's credit budget and pre-ticks the games worth spending on (a regular ruled out = props most likely mispriced). Untick or tick games and watch the cost update.
 3. The **Picks** tab shows only TOP picks, most likely to hit first; tick *Show LEAN* / *Show AVOID* for the rest. Click a pick for its factor checklist (✓/✗) and red flags. ◀ ▶ browse past days with results.
 4. The **Record** tab shows each tier's record and how sharp the model is vs the books per market.
@@ -64,10 +69,23 @@ python app.py
 
 ```bash
 python daily.py                     # catch up, then plan and pull within budget
+python daily.py update              # free catch-up only, no questions (what the schedule runs)
+python daily.py live                # live scores + grade finished games (free)
+python daily.py injuries            # official NBA injury report + ESPN (free)
+python nba_injury.py                # print the newest official report as the program reads it
 python daily.py picks [date] [all]  # show good picks again (add "all" for every tier)
 python daily.py credits             # credit balance and today's budget (free)
 python daily.py backtest            # grade the models on past seasons
 python daily.py status              # database summary
+```
+
+### Automatic daily updates (free)
+
+Turn on once per computer. It runs `daily.py update` at 10:10 AM, 1:10 PM, 5:40 PM, 7:10 PM and 11:50 PM (around when teams file injury reports, plus a late run that grades the night). A computer that's asleep runs it when it wakes. Output goes to `logs/update.log`.
+
+```bash
+./schedule_mac.sh          # Mac   (./schedule_mac.sh off to stop)
+schedule_windows.bat       # Windows: double-click   (schedule_windows.bat off to stop)
 ```
 
 ### Credits (The Odds API free plan)
@@ -88,8 +106,8 @@ python daily.py status              # database summary
 - [x] Confidence-based picks with factor checklist (last-10 hit rate, minutes, matchup, role)
 - [x] One-command Mac setup
 - [x] Desktop GUI (tkinter)
-- [ ] Pace in the model; closing-line value (CLV) tracking
-- [ ] LLM parsing of injury and lineup news
+- [x] Official NBA injury report, free live scores + instant grading, daily team/shooting snapshots, scheduled updates
+- [ ] Pace and shooting splits in the model (data is being collected; turn on once a backtest shows it helps); closing-line value (CLV) tracking
 - [ ] FastAPI service + play-money odds website, deployed
 
 ## Disclaimer

@@ -28,6 +28,9 @@ CREDIT_RESERVE = 15       # never plan to spend below this
 PROP_REFRESH_HOURS = 4    # a game's props pulled within this many hours are reused, not re-bought
 LINES_REFRESH_HOURS = 3   # same for game lines
 
+# ---------- Free NBA.com data ----------
+LIVE_REFRESH_SECONDS = 120   # the app refreshes live scores this often while games are on (free)
+
 # ---------- Which picks to pull (each prop market = 1 credit per game) ----------
 # Fewer markets = more games per month. Threes and points are where the model is
 # strongest; add others back once the Record tab shows they earn their credits.

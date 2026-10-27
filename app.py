@@ -5,7 +5,9 @@ app.py — desktop window for the NBA odds tracker (no command prompt needed).
 
   Update (free)   box scores, grading, injuries — same as the first half of daily.py
   Pull lines      shows today's credit budget and which games are worth it, then pulls
-  Picks tab       only BEST picks by default; tick the boxes to see weaker ones
+  Live (free)     live scores from NBA.com; picks show their progress and grade at the final
+  Picks tab       only TOP picks by default; tick the boxes to see weaker ones
+  Scores tab      today's games, score and clock (refreshes itself while games are on)
   Record tab      how each tier has done, and how sharp the model is per market
   Injuries tab    today's injury report
   Log tab         everything the pipeline printed
@@ -23,7 +25,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta
 from tkinter import messagebox, ttk
 
-from config import ET, PROP_MARKETS, PULL_GAME_LINES, PULL_PROP_MARKETS
+from config import ET, LIVE_REFRESH_SECONDS, PROP_MARKETS, PULL_GAME_LINES, PULL_PROP_MARKETS
 from db import connect
 
 # ---------------- look ----------------
@@ -80,6 +82,7 @@ class App(tk.Tk):
         self.after(100, self._poll)
         self.refresh()
         self.after(300, self.check_credits)
+        self.after(2000, self.auto_live)
 
     # ---------- styling ----------
     def _style(self):
@@ -148,6 +151,8 @@ class App(tk.Tk):
         self.pull_btn.pack(side="right")
         self.update_btn = ttk.Button(top, text="Update (free)", command=self.run_update)
         self.update_btn.pack(side="right", padx=8)
+        self.live_btn = ttk.Button(top, text="Live scores (free)", command=self.run_live)
+        self.live_btn.pack(side="right")
 
         sub = ttk.Frame(self, padding=(16, 0, 16, 6))
         sub.pack(fill="x")
@@ -159,6 +164,7 @@ class App(tk.Tk):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=16, pady=(6, 0))
         self._build_picks()
+        self._build_scores()
         self._build_record()
         self._build_injuries()
         self._build_log()
@@ -255,14 +261,16 @@ class App(tk.Tk):
         self.inj_lbl.pack(anchor="w", pady=(0, 8))
         wrap, self.inj_tree = self._tree(f, [
             ("team", "TEAM", 70, "w"), ("who", "PLAYER", 200, "w"), ("status", "STATUS", 110, "w"),
-            ("note", "NOTE", 500, "w"), ("ret", "RETURN", 110, "w")])
+            ("note", "NOTE", 470, "w"), ("ret", "RETURN", 100, "w"), ("src", "SOURCE", 70, "w")])
         wrap.pack(fill="both", expand=True)
         self.inj_tree.tag_configure("out", foreground=C["avoid"])
         self.inj_tree.tag_configure("q", foreground=C["consider"])
+        self.inj_tree.tag_configure("ok", foreground=C["best"])
 
     def _build_log(self):
         f = ttk.Frame(self.nb, style="Panel.TFrame", padding=12)
         self.nb.add(f, text="Log")
+        self.log_frame = f
         self.log = tk.Text(f, bg=C["panel2"], fg=C["text"], relief="flat", wrap="none",
                            font=("Consolas" if sys.platform.startswith("win") else "Menlo"
                                  if sys.platform == "darwin" else "DejaVu Sans Mono", 9),
@@ -315,6 +323,7 @@ class App(tk.Tk):
         state = "disabled" if busy else "normal"
         self.update_btn.configure(state=state)
         self.pull_btn.configure(state=state)
+        self.live_btn.configure(state=state)
         if busy:
             self.status.configure(text=f"{label}…")
             self.progress.pack(side="right")
@@ -337,7 +346,7 @@ class App(tk.Tk):
             con = connect()
             daily.catch_up(con)
             con.close()
-        self.nb.select(3)
+        self.nb.select(self.log_frame)
         self.run_task("Update", fn)
 
     def open_pull(self):
@@ -384,6 +393,90 @@ class App(tk.Tk):
         self.clipboard_append(f"{e['name']}: {e['pick']} {e['price']:+d} ({e['book']})")
         self.status.configure(text="Copied pick to clipboard")
 
+    # ---------- live scores (free) ----------
+    def run_live(self, quiet=False):
+        def fn():
+            from nba_live import update_live
+            import daily
+            update_live(verbose=not quiet)
+            con = connect()
+            n = daily.grade(con, quiet=True)
+            con.close()
+            return n
+
+        def done(n):
+            self.status.configure(text="Live scores updated" + (f" · {n} picks graded" if n else "")
+                                  + f" · {datetime.now(ET):%I:%M %p}")
+        self.run_task("Live scores", fn, done=done)
+
+    def auto_live(self):
+        """While games are on, refresh live scores every LIVE_REFRESH_SECONDS (free)."""
+        try:
+            from nba_live import games_active
+            con = connect()
+            active = games_active(con, today_str())
+            con.close()
+            if active and not self.busy and self.day == datetime.now(ET).date():
+                self.run_live(quiet=True)
+        except Exception:
+            self.log.insert("end", traceback.format_exc())
+        self.after(LIVE_REFRESH_SECONDS * 1000, self.auto_live)
+
+    def attach_live(self, con, day):
+        from nba_extra import context_lines
+        from nba_live import live_for, live_text
+        players, games = live_for(con, day)
+        for e in self.board:
+            e["live"] = None if e["result"] else live_text(e, players, games)
+            e["context"] = context_lines(con, e, day)
+
+    def day_record(self):
+        out = []
+        for tier in ("BEST", "CONSIDER"):
+            res = [e["result"] for e in self.board if e["tier"] == tier and e["result"] in ("W", "L")]
+            if res:
+                out.append(f"{TIER_TEXT[tier]} {res.count('W')}-{res.count('L')}")
+        return ("   ·   this day: " + ", ".join(out)) if out else ""
+
+    def _build_scores(self):
+        f = ttk.Frame(self.nb, style="Panel.TFrame", padding=12)
+        self.nb.add(f, text="Scores")
+        self.scores_lbl = ttk.Label(f, style="PanelMuted.TLabel")
+        self.scores_lbl.pack(anchor="w", pady=(0, 8))
+        wrap, self.scores_tree = self._tree(f, [
+            ("game", "GAME", 150, "w"), ("score", "SCORE", 120, "center"), ("status", "STATUS", 130, "w"),
+            ("picks", "YOUR PICKS IN THIS GAME", 520, "w")])
+        wrap.pack(fill="both", expand=True)
+        self.scores_tree.tag_configure("live", foreground=C["consider"])
+        self.scores_tree.tag_configure("final", foreground=C["muted"])
+
+    def fill_scores(self, con, day):
+        t = self.scores_tree
+        t.delete(*t.get_children())
+        rows = con.execute("SELECT * FROM live_games WHERE game_date=? ORDER BY tip_utc", (day,)).fetchall()
+        if not rows:
+            self.scores_lbl.configure(text="No scores saved for this day. Click “Live scores (free)” on a game day.")
+            return
+        upd = max(r["updated_utc"] for r in rows)
+        upd_et = datetime.fromisoformat(upd).astimezone(ET)
+        self.scores_lbl.configure(text=f"From NBA.com's scoreboard · last refreshed {upd_et:%I:%M %p} · "
+                                       f"refreshes itself every {LIVE_REFRESH_SECONDS // 60} min while games are on")
+        for r in rows:
+            mine = []
+            for e in self.board:
+                if e["tier"] not in ("BEST", "CONSIDER"):
+                    continue
+                teams = {e.get("team"), e.get("opp")} if e["kind"] == "prop" else {e.get("home"), e.get("away")}
+                if {r["home"], r["away"]} == teams:
+                    res = {"W": "✓", "L": "✗", "P": "push", "DNP": "DNP"}.get(e["result"], "") or \
+                        (e.get("live") or ("",))[0].split(" ")[0]
+                    who = (e["name"].split()[-1] + " ") if e["kind"] == "prop" else ""
+                    mine.append(f"{res} {who}{e['pick']}".strip())
+            tag = "live" if r["status"] == 2 else "final" if r["status"] == 3 else ""
+            score = f"{r['away_pts']} - {r['home_pts']}" if r["status"] != 1 else ""
+            t.insert("", "end", tags=(tag,), values=(f"{r['away']} @ {r['home']}", score,
+                                                     r["status_text"], "   ".join(mine)))
+
     # ---------- refresh views ----------
     def refresh(self):
         if self.busy:
@@ -402,7 +495,9 @@ class App(tk.Tk):
             f"({days_until_reset()}d)"))
         try:
             self.board, self.n_props, self.n_games = build_board(con, day)
+            self.attach_live(con, day)
             self.fill_picks()
+            self.fill_scores(con, day)
             self.fill_record(con)
             self.fill_injuries(con, day)
         except Exception as e:
@@ -425,7 +520,8 @@ class App(tk.Tk):
             t.insert("", "end", iid=str(i), tags=(e["tier"],), values=(
                 TIER_TEXT[e["tier"]], e["pick"], e["name"], f"{e['price']:+d}", e["book"],
                 f"{e['win']:.0%}", f"{e['market']:.0%}", f"{e['n_ok']}/{len(e['signals'])}",
-                {"W": "✓ W", "L": "✗ L", "P": "push", "DNP": "DNP"}.get(e["result"], "")))
+                {"W": "✓ W", "L": "✗ L", "P": "push", "DNP": "DNP"}.get(e["result"], "")
+                or (e.get("live") or ("",))[0]))
         best = sum(1 for e in self.board if e["tier"] == "BEST")
         hidden = len(self.board) - len(self.visible)
         if not self.n_props and not self.n_games:
@@ -435,7 +531,8 @@ class App(tk.Tk):
             msg = (f"{best} {TIER_TEXT['BEST']} pick{'s' * (best != 1)}"
                    + (" — passing today is a fine pick too" if not best else "")
                    + f"   ·   {self.n_games} games, {self.n_props} prop lines checked"
-                   + (f"   ·   {hidden} weaker hidden" if hidden else ""))
+                   + (f"   ·   {hidden} weaker hidden" if hidden else "")
+                   + self.day_record())
         self.summary.configure(text=msg)
         if self.visible:
             t.selection_set("0")
@@ -462,8 +559,14 @@ class App(tk.Tk):
         if e["warn"]:
             parts.append(("\nRED FLAGS\n", "label"))
             parts += [(f"!  {w}\n", "warn") for w in e["warn"]]
+        if e.get("context"):
+            parts.append(("\nMATCHUP DATA (NBA.com)\n", "label"))
+            parts += [(f"·  {c}\n", "") for c in e["context"]]
         if e["result"]:
             parts.append((f"\nRESULT: {e['result']}\n", "good" if e["result"] == "W" else "warn"))
+        elif e.get("live"):
+            parts.append(("\nLIVE\n", "label"))
+            parts.append((e["live"][1] + "\n", "good" if e["live"][0].startswith(("↑", "✓")) else "warn"))
         self._detail_text(None, parts)
 
     def _detail_text(self, plain, parts):
@@ -512,12 +615,18 @@ class App(tk.Tk):
             return
         rows = con.execute("SELECT * FROM injuries WHERE snapshot_date=? ORDER BY team, status, player",
                            (snap,)).fetchall()
-        self.inj_lbl.configure(text=f"ESPN report from {snap} · {len(rows)} players")
+        from db import get_meta
+        nba = sum(1 for r in rows if "source" in r.keys() and r["source"] == "NBA")
+        official = get_meta(con, "nba_injury_report")
+        self.inj_lbl.configure(text=f"Injury list for {snap} · {len(rows)} players · "
+                                    + (f"{nba} from the official NBA report ({official}), rest from ESPN"
+                                       if nba else "ESPN (official NBA report not posted yet)"))
         for r in rows:
             st = (r["status"] or "").lower()
-            tag = "out" if st in ("out", "doubtful", "suspension") else "q"
+            tag = "out" if st in ("out", "doubtful", "suspension") else "ok" if st == "available" else "q"
+            src = r["source"] if "source" in r.keys() and r["source"] else "ESPN"
             t.insert("", "end", tags=(tag,), values=(r["team"], r["player"], r["status"],
-                                                     r["comment"], r["return_date"]))
+                                                     r["comment"], r["return_date"], src))
 
 
 # ======================= pull dialog =======================
