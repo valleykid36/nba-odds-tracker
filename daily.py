@@ -31,6 +31,8 @@ Other commands (optional):
     python daily.py picks [YYYY-MM-DD]    show the good picks again (free); add "all" for every tier
     python daily.py credits               credit balance and today's budget (free)
     python daily.py clv                   closing-line value of game picks (ESPN, free)
+    python hot.py                         hot players, season-long streaks, safest milestones (free)
+    python parlay.py                      today's suggested parlays (free; priced once lines are pulled)
     python daily.py backtest              test the models on past seasons (free)
     python daily.py status                what's in the database
 """
@@ -38,7 +40,8 @@ Other commands (optional):
 import sys
 from datetime import datetime, timedelta
 
-from config import CURRENT_SEASON, ET, PROP_MARKETS, PULL_GAME_LINES, PULL_PROP_MARKETS, SEASONS
+from config import (CURRENT_SEASON, ET, PROP_MARKETS, PULL_ALT_MARKETS, PULL_GAME_LINES, PULL_PROP_MARKETS,
+                    SEASONS)
 from db import connect, get_meta, set_meta
 
 
@@ -97,7 +100,7 @@ def catch_up(con):
         update_clv(con)                      # closing lines for game picks (ESPN, free)
         refresh_today(con)                   # today's open + current lines (line movement)
     except Exception as e:
-        print(f"   couldn't get closing lines ({e}); will try again next update")
+        print(f"   couldn't get closing lines / line movement ({e}); will try again next update")
     if last_run:
         missed(con, last_run)
 
@@ -117,6 +120,14 @@ def catch_up(con):
             set_meta(con, "team_stats_date", today())
         except Exception as e:
             print(f"   couldn't get team stats ({e}); will try again next update")
+
+    # 7) Hot players, milestone legs and parlays for today; grades past ones (free)
+    print("\nHot players and parlays...")
+    try:
+        from parlay import refresh
+        refresh(con)
+    except Exception as e:
+        print(f"   couldn't build hot players / parlays ({e})")
     set_meta(con, "last_run", today())
 
 
@@ -131,7 +142,7 @@ def pull(con, chosen, lines=PULL_GAME_LINES, force=False):
         used += update_odds(force=force)
     for tip, ev in chosen:
         print(f"Player props: {ev['away_team']} @ {ev['home_team']}")
-        used += update_props(ev, PULL_PROP_MARKETS, force=force)
+        used += update_props(ev, PULL_PROP_MARKETS + PULL_ALT_MARKETS, force=force)
     try:
         from clv import refresh_today
         refresh_today(con)                   # freshest line movement before picks are tiered
@@ -139,6 +150,13 @@ def pull(con, chosen, lines=PULL_GAME_LINES, force=False):
         print(f"   line movement unavailable ({e})")
     predict_games(con, today())
     predict_props(con, today())
+    try:
+        from picks import build_board
+        build_board(con, today())            # tier today's picks first (parlays use them)
+        from parlay import refresh
+        refresh(con)                         # milestone legs priced + parlays (free, uses what was pulled)
+    except Exception as e:
+        print(f"   parlays unavailable ({e})")
     print(f"\nCredits used this pull: {used}")
     return used
 
@@ -187,7 +205,7 @@ def run():
         chosen = events if pick == "all" else [] if pick == "none" else [
             e for i, e in enumerate(events, 1) if str(i) in pick.replace(" ", "").split(",")]
     from ingest import fresh_prop_markets
-    cost = p["lines_cost"] + sum(len([m for m in PULL_PROP_MARKETS
+    cost = p["lines_cost"] + sum(len([m for m in PULL_PROP_MARKETS + PULL_ALT_MARKETS
                                       if m not in fresh_prop_markets(con, ev["id"])])
                                  for _, ev in chosen)
     print(f"\nThis will use up to {cost} credits. Credits left: {left if left is not None else 'unknown'}")

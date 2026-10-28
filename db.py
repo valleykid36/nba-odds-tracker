@@ -87,6 +87,21 @@ CREATE TABLE IF NOT EXISTS espn_lines (
     PRIMARY KEY (game_date, espn_id, kind, market, side)
 );
 
+-- Milestone calls from hot.py ("Maxey 20+ PTS, 84%"), graded so the model's calibration is tracked.
+CREATE TABLE IF NOT EXISTS hot_legs (
+    game_date TEXT, player_key TEXT, player TEXT, team TEXT, opp TEXT, stat TEXT, t INTEGER,
+    p REAL, price INTEGER, book TEXT, hits INTEGER, n INTEGER, created_utc TEXT,
+    result TEXT, actual INTEGER,
+    PRIMARY KEY (game_date, player_key, stat, t)
+);
+
+-- Parlays suggested by parlay.py (legs stored as JSON), graded leg by leg.
+CREATE TABLE IF NOT EXISTS parlays (
+    game_date TEXT, name TEXT, legs TEXT, p_hit REAL, price INTEGER, ev REAL, priced INTEGER,
+    created_utc TEXT, result TEXT, legs_won INTEGER, legs_graded INTEGER,
+    PRIMARY KEY (game_date, name)
+);
+
 -- Live scores from NBA.com's free scoreboard (no credits).
 CREATE TABLE IF NOT EXISTS live_games (
     game_id TEXT PRIMARY KEY, game_date TEXT, tip_utc TEXT, home TEXT, away TEXT,

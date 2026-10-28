@@ -11,7 +11,7 @@ The free plan gives MONTHLY_CREDITS (500) that reset on the 1st. This module:
 import calendar
 from datetime import date, datetime
 
-from config import (CREDIT_RESERVE, ET, MIN_MINUTES, MONTHLY_CREDITS, PULL_GAME_LINES,
+from config import (CREDIT_RESERVE, ET, MIN_MINUTES, MONTHLY_CREDITS, PULL_ALT_MARKETS, PULL_GAME_LINES,
                     PULL_PROP_MARKETS, team_abbr)
 from db import get_meta
 
@@ -101,7 +101,7 @@ def plan(con, events, game_date, budget=None, markets=None):
     Games are chosen in score order until the budget runs out.
     """
     from ingest import fresh_prop_markets, lines_are_fresh
-    markets = markets or PULL_PROP_MARKETS
+    markets = markets or (PULL_PROP_MARKETS + PULL_ALT_MARKETS)
     budget = daily_budget(con) if budget is None else budget
     lines_cost = 3 if PULL_GAME_LINES and not lines_are_fresh(con, game_date) else 0
     room = (budget if budget is not None else 10 ** 6) - lines_cost

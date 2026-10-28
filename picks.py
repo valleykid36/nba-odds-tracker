@@ -28,7 +28,7 @@ from config import (BEST_EV, BEST_MIN_GAMES, CONF_LEAN, CONF_TOP, CONSIDER_EV,
                     HIT_RATE_GAMES, HIT_RATE_NEEDED, INJURY_EDGE_MIN, INJURY_FLAG_MIN,
                     INJURY_TOTAL_MIN, LEAN_MIN_EV, LINE_MOVE, LINE_MOVE_FLAG, LEAN_SIGNAL_SHARE, MAX_BEST_PICKS,
                     MAX_DISAGREE, MAX_PICKS_PER_PLAYER, MIN_MINUTES, MIN_MINUTES_OVER,
-                    MODEL_TRUST, PICK_MODE, PROP_MARKETS, ROLE_CHANGE_FLAG, TOP_MIN_EV,
+                    MODEL_TRUST, PICK_MODE, PROP_MARKETS, ROLE_CHANGE_FLAG, ROLE_FLAG_MIN_GAMES, TOP_MIN_EV,
                     TOP_SIGNAL_SHARE, TRUST_PRIOR_LINES, payout)
 
 GAME_LABELS = {"h2h": "ML", "spreads": "SPREAD", "totals": "TOTAL"}
@@ -217,14 +217,14 @@ def classify_prop(p, trust, form, side=None):
 
     # ---- red flags ----
     warn = []
-    role_against = role is not None and ((not over and role >= ROLE_CHANGE_FLAG)
-                                         or (over and role <= -ROLE_CHANGE_FLAG))
+    cur = p["cur_games"] or 0
+    role_against = (role is not None and cur >= ROLE_FLAG_MIN_GAMES
+                    and ((not over and role >= ROLE_CHANGE_FLAG) or (over and role <= -ROLE_CHANGE_FLAG)))
     if role_against:
         warn.append(f"production {role:+.0%} vs last season, opposite to this pick")
     disagree = abs(model - market)
     if disagree > MAX_DISAGREE:
         warn.append(f"model ({model:.0%}) and books ({market:.0%}) far apart: likely something the model misses")
-    cur = p["cur_games"] or 0
     if cur < BEST_MIN_GAMES:
         warn.append(f"{cur} game{'s' * (cur != 1)} this season; leans on last season")
     if "self:" in (p["notes"] or ""):
@@ -239,7 +239,7 @@ def classify_prop(p, trust, form, side=None):
     if PICK_MODE == "value":
         tier = _value_tier(value, warn, role_against, over, cur, model - market)
     else:
-        tier = grade_tier(win, signals, warn, value, role_against or disagree > MAX_DISAGREE)
+        tier = grade_tier(win, signals, warn, value, role_against)
     return dict(kind="prop", tier=tier, side=side, name=p["player"] or p["player_key"], who=p["player_key"],
                 team=p["team"], opp=p["opp"], stats=cfg["stats"], line=line,
                 game=p["event_id"], matchup=f"{p['team']} vs {p['opp']}",

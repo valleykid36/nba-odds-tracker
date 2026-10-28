@@ -7,6 +7,8 @@ app.py — desktop window for the NBA odds tracker (no command prompt needed).
   Pull lines      shows today's credit budget and which games are worth it, then pulls
   Live (free)     live scores from NBA.com; picks show their progress and grade at the final
   Picks tab       only TOP picks by default; tick the boxes to see weaker ones
+  Hot players     who's hot or cold, season-long streaks, chance to reach each milestone tonight
+  Parlays         parlays built from the likeliest legs, their results, and the parlay record
   Scores tab      today's games, score and clock (refreshes itself while games are on)
   Record tab      how each tier has done, and how sharp the model is per market
   Injuries tab    today's injury report
@@ -164,6 +166,9 @@ class App(tk.Tk):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=16, pady=(6, 0))
         self._build_picks()
+        from app_hot import build_hot_tab, build_parlay_tab
+        build_hot_tab(self, C, FONT)
+        build_parlay_tab(self, C, FONT)
         self._build_scores()
         self._build_record()
         self._build_injuries()
@@ -500,6 +505,9 @@ class App(tk.Tk):
             self.fill_scores(con, day)
             self.fill_record(con)
             self.fill_injuries(con, day)
+            from app_hot import fill_hot, fill_parlays
+            fill_hot(self, con, day)
+            fill_parlays(self, con, day)
         except Exception as e:
             self.log.insert("end", traceback.format_exc())
             self.status.configure(text=f"Couldn't show {day}: {e}  (details in Log tab)")

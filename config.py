@@ -45,6 +45,10 @@ LIVE_REFRESH_SECONDS = 120   # the app refreshes live scores this often while ga
 # Fewer markets = more games per month. Threes and points are where the model is
 # strongest; add others back once the Record tab shows they earn their credits.
 PULL_PROP_MARKETS = ["player_threes", "player_points"]
+# "X or more" lines for milestone parlay legs (Maxey 20+ PTS). 1 credit per market per game, pulled
+# for the same games as the props above. Others: player_rebounds_alternate, player_assists_alternate,
+# player_points_rebounds_assists_alternate. Set to [] to skip them.
+PULL_ALT_MARKETS = ["player_points_alternate", "player_threes_alternate"]
 PULL_GAME_LINES = True   # moneyline + spread + total for ALL of today's games = 3 credits
 
 # Each prop market: which box-score stats it adds up, and its "randomness" (NB r; lower = streakier).
@@ -97,6 +101,7 @@ BEST_MIN_PRICE = -160   # pricier than this is a red flag
 BEST_MIN_GAMES = 2      # fewer games this season than this is a red flag
 MAX_PICKS_PER_PLAYER = 1  # Over points + Over PRA on the same player is one bet, not two
 MAX_BEST_PICKS = 5      # only the top few by EV stay BEST; the rest drop to CONSIDER
+ROLE_FLAG_MIN_GAMES = 5    # role-change red flag needs this many games this season (1-2 games is noise)
 ROLE_CHANGE_FLAG = 0.20 # stat rate per minute up/down 20%+ vs last season = role changed
 
 # ---------- Pick mode ----------
@@ -115,6 +120,11 @@ LINE_MOVE_FLAG = {"spreads": 2.0, "totals": 3.0, "h2h": 0.06}  # this much AGAIN
 INJURY_EDGE_MIN = 20     # game picks: regular minutes missing, one team vs the other, that counts
 INJURY_FLAG_MIN = 45     # this many more minutes missing on YOUR team = red flag (model can't see it)
 INJURY_TOTAL_MIN = 50    # both teams together missing this many minutes leans Under
+# ---------- Parlays (parlay.py) ----------
+PARLAY_MAX_LEGS = 4         # biggest parlay suggested
+PARLAY_MAX_PER_GAME = 1     # legs from the same game move together; most books won't mix them
+PARLAY_MIN_LEG_P = 0.65     # no leg less likely than this
+PARLAY_MIN_LEG_EV = -0.05   # no leg priced much worse than its chance (stacking those loses fast)
 MAX_DISAGREE = 0.18      # model and books more than 18 points apart = probably a model blind spot
 HIT_RATE_GAMES = 10      # "recent form" looks at the player's last 10 games (10+ minutes)
 HIT_RATE_NEEDED = 0.6    # ...and wants this side to have hit in 6 of them

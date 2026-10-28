@@ -13,8 +13,12 @@ A season-long NBA data pipeline and prediction system. It collects box scores, i
 - **Player prop model:** projected minutes × per-minute rates weighted toward the current season, adjusted for what the opponent allows and for teammates newly ruled out; threes use attempts × shrunk 3P%; negative binomial probabilities for every market
 - **Game model:** margin-of-victory Elo for moneyline and spread, back-to-back rest adjustment (backtest reports whether it helps), recent scoring/allowing for totals
 - **Picks most likely to hit:** each line's chance to hit blends the model with the market, weighted by how sharp the model has actually been in that market (re-learned from every graded line). A pick needs the model and the sportsbooks to favor the same side, then shows a factor checklist (model projection, books, last-10-game hit rate, minutes, matchup, role/teammates out; for games: record, rest, home court). TOP plays are 60%+ to hit with most factors agreeing, no red flags, and a price that isn't overpaying. Ranked by chance to hit, top 5, one per player. (`PICK_MODE = "value"` in `config.py` switches back to EV ranking.)
+- **Hot players and streaks:** for every rotation player playing that day: season hit counts at each milestone (e.g. *15+ PTS in all 4 games*), current streaks, floors, and a heat meter (last 5 games vs normal level). A milestone model gives the chance to reach any "X or more" tonight for PTS, 3PM, REB, AST and PRA; backtested on ~23,000 games per stat across three seasons (when it said 80–90%, 85–89% hit). Testing showed hot streaks carry over only about a third of the way, so recent form is weighted at its fitted value (20–40% by stat) instead of chased. Every call is saved and graded to track calibration this season
+- **Parlay builder:** combines the likeliest legs (milestones priced with alternate lines, plus TOP/LEAN props) into Safest 2/3-leg, Plus-money, Hot-hand and Best-value parlays; one leg per player and per game, leg chances scaled by the model's honesty so far this season, and every parlay graded leg by leg
+- **Game-pick injuries and line movement:** regulars ruled out on each side and the open→current line move (ESPN, free) as factors and red flags
+- **Closing-line value (CLV):** every game pick compared with DraftKings' closing line from ESPN, free
 - **Credit budget:** spreads the free plan's 500 monthly credits (reset on the 1st) across the month, spends them first on games with injury news (found with free data), and never re-buys lines pulled in the last few hours
-- **Desktop app:** tkinter window with picks, record, injuries and a pull-lines planner
+- **Desktop app:** tkinter window with picks, hot players, parlays, scores, record, injuries and a pull-lines planner; one-click desktop/Start-menu shortcut (`make_shortcut.bat`, Ctrl+Alt+N)
 - **Backtesting:** day-by-day replay of past seasons using only prior information; Brier score and calibration per market
 - **Grading:** every pick scored against the box score and the market; record and ROI tracked per tier
 - API keys kept out of source code via environment variables
@@ -107,7 +111,10 @@ schedule_windows.bat       # Windows: double-click   (schedule_windows.bat off t
 - [x] One-command Mac setup
 - [x] Desktop GUI (tkinter)
 - [x] Official NBA injury report, free live scores + instant grading, daily team/shooting snapshots, scheduled updates
-- [ ] Pace and shooting splits in the model (data is being collected; turn on once a backtest shows it helps); closing-line value (CLV) tracking
+- [x] Closing-line value (CLV) tracking; injuries and line movement in game picks
+- [x] Hot-player streak tracking, backtested milestone model, parlay builder with grading
+- [ ] Opponent and minutes adjustments in the milestone model; prop CLV
+- [ ] Pace and shooting splits in the model (data is being collected; turn on once a backtest shows it helps)
 - [ ] FastAPI service + play-money odds website, deployed
 
 ## Disclaimer
