@@ -79,6 +79,7 @@ class App(tk.Tk):
         self.board = []
         self.show_consider = tk.BooleanVar(value=False)
         self.show_avoid = tk.BooleanVar(value=False)
+        self._load_gen, self._loading, self._reload = 0, False, False
         self._style()
         self._build()
         self.after(100, self._poll)
@@ -309,6 +310,8 @@ class App(tk.Tk):
                 if item[0] == "log":
                     self.log.insert("end", item[1])
                     self.log.see("end")
+                elif item[0] == "view":
+                    self._paint(*item[1:])
                 else:
                     _, label, result, done, err = item
                     self.set_busy(False)
@@ -406,6 +409,13 @@ class App(tk.Tk):
             update_live(verbose=not quiet)
             con = connect()
             n = daily.grade(con, quiet=True)
+            try:                              # milestone legs and parlays grade at the final too
+                from hot import grade_legs
+                from parlay import grade as grade_parlays
+                grade_legs(con)
+                grade_parlays(con)
+            except Exception as e:
+                print(f"   couldn't grade legs/parlays ({e})")
             con.close()
             return n
 
@@ -421,19 +431,11 @@ class App(tk.Tk):
             con = connect()
             active = games_active(con, today_str())
             con.close()
-            if active and not self.busy and self.day == datetime.now(ET).date():
+            if active and not self.busy:
                 self.run_live(quiet=True)
         except Exception:
             self.log.insert("end", traceback.format_exc())
         self.after(LIVE_REFRESH_SECONDS * 1000, self.auto_live)
-
-    def attach_live(self, con, day):
-        from nba_extra import context_lines
-        from nba_live import live_for, live_text
-        players, games = live_for(con, day)
-        for e in self.board:
-            e["live"] = None if e["result"] else live_text(e, players, games)
-            e["context"] = context_lines(con, e, day)
 
     def day_record(self):
         out = []
@@ -455,10 +457,9 @@ class App(tk.Tk):
         self.scores_tree.tag_configure("live", foreground=C["consider"])
         self.scores_tree.tag_configure("final", foreground=C["muted"])
 
-    def fill_scores(self, con, day):
+    def fill_scores(self, rows):
         t = self.scores_tree
         t.delete(*t.get_children())
-        rows = con.execute("SELECT * FROM live_games WHERE game_date=? ORDER BY tip_utc", (day,)).fetchall()
         if not rows:
             self.scores_lbl.configure(text="No scores saved for this day. Click “Live scores (free)” on a game day.")
             return
@@ -483,36 +484,53 @@ class App(tk.Tk):
                                                      r["status_text"], "   ".join(mine)))
 
     # ---------- refresh views ----------
+    # Reading the database and running the models happens on a background thread (load_view),
+    # so the window never freezes; only drawing the results happens on the window's thread.
     def refresh(self):
-        if self.busy:
-            return
-        from budget import credits_left, daily_budget, days_until_reset, reset_date
-        from picks import build_board
-        con = connect()
-        day = self.day.isoformat()
         is_today = self.day == datetime.now(ET).date()
         self.date_lbl.configure(text=("Today · " if is_today else "") + self.day.strftime("%a %b %d"))
-        left = credits_left(con)
-        budget = daily_budget(con)
+        self._load_gen += 1
+        if self._loading:
+            self._reload = True             # a load is running; start a fresh one when it ends
+            return
+        self._loading = True
+        gen, day = self._load_gen, self.day.isoformat()
+
+        def target():
+            try:
+                self.q.put(("view", gen, day, load_view(day), None))
+            except Exception as e:
+                self.q.put(("view", gen, day, None, (e, traceback.format_exc())))
+        threading.Thread(target=target, daemon=True).start()
+
+    def _paint(self, gen, day, data, err):
+        self._loading = False
+        if self._reload or gen != self._load_gen:
+            self._reload = False
+            self.refresh()                  # the day changed (or new data) while loading
+            return
+        if err:
+            self.log.insert("end", err[1])
+            self.status.configure(text=f"Couldn't show {day}: {err[0]}  (details in Log tab)")
+            return
+        from budget import days_until_reset, reset_date
+        left, budget = data["credits"]
         self.credit_lbl.configure(text=(
             f"{left if left is not None else '?'} credits left · today's budget "
             f"{budget if budget is not None else '?'} · resets {reset_date():%b} 1 "
             f"({days_until_reset()}d)"))
         try:
-            self.board, self.n_props, self.n_games = build_board(con, day)
-            self.attach_live(con, day)
+            self.board, self.n_props, self.n_games = data["board"]
             self.fill_picks()
-            self.fill_scores(con, day)
-            self.fill_record(con)
-            self.fill_injuries(con, day)
+            self.fill_scores(data["scores"])
+            self.fill_record(data["record"])
+            self.fill_injuries(data["injuries"])
             from app_hot import fill_hot, fill_parlays
-            fill_hot(self, con, day)
-            fill_parlays(self, con, day)
+            fill_hot(self, *data["hot"])
+            fill_parlays(self, data["parlays"])
         except Exception as e:
             self.log.insert("end", traceback.format_exc())
             self.status.configure(text=f"Couldn't show {day}: {e}  (details in Log tab)")
-        finally:
-            con.close()
 
     def fill_picks(self):
         t = self.picks_tree
@@ -587,11 +605,10 @@ class App(tk.Tk):
             d.insert("end", text, tag)
         d.configure(state="disabled")
 
-    def fill_record(self, con):
-        from clv import clv_summary, describe
-        from picks import learned_trust, market_label, records
-        since = (datetime.now(ET).date() - timedelta(days=30)).isoformat()
-        allr, recent, clv = records(con), records(con, since), clv_summary(con)
+    def fill_record(self, data):
+        from clv import describe
+        from picks import market_label
+        allr, recent, clv, trust = data
         for tier, (big, small) in self.cards.items():
             r, r30 = allr[tier], recent[tier]
             if r["w"] + r["l"]:
@@ -604,7 +621,6 @@ class App(tk.Tk):
                 small.configure(text="no graded picks yet\n")
         t = self.trust_tree
         t.delete(*t.get_children())
-        trust = learned_trust(con)
         for m, x in sorted(trust.items(), key=lambda kv: -kv[1]["n"]):
             better = x["model"] < x["market"]
             note = ("model has an edge here" if better and x["n"] >= 200 else
@@ -615,19 +631,14 @@ class App(tk.Tk):
                 market_label(m), f"{x['n']:,}", f"{x['model']:.4f}", f"{x['market']:.4f}",
                 "model" if better else "books", f"{x['trust']:.0%}", note + pulled))
 
-    def fill_injuries(self, con, day):
+    def fill_injuries(self, data):
         t = self.inj_tree
         t.delete(*t.get_children())
-        snap = con.execute("SELECT MAX(snapshot_date) FROM injuries WHERE snapshot_date<=?",
-                           (day,)).fetchone()[0]
+        snap, rows, official = data
         if not snap:
             self.inj_lbl.configure(text="No injury report yet. Click Update (free).")
             return
-        rows = con.execute("SELECT * FROM injuries WHERE snapshot_date=? ORDER BY team, status, player",
-                           (snap,)).fetchall()
-        from db import get_meta
         nba = sum(1 for r in rows if "source" in r.keys() and r["source"] == "NBA")
-        official = get_meta(con, "nba_injury_report")
         self.inj_lbl.configure(text=f"Injury list for {snap} · {len(rows)} players · "
                                     + (f"{nba} from the official NBA report ({official}), rest from ESPN"
                                        if nba else "ESPN (official NBA report not posted yet)"))
@@ -637,6 +648,50 @@ class App(tk.Tk):
             src = r["source"] if "source" in r.keys() and r["source"] else "ESPN"
             t.insert("", "end", tags=(tag,), values=(r["team"], r["player"], r["status"],
                                                      r["comment"], r["return_date"], src))
+
+
+# ======================= loading a day (background thread) =======================
+def load_view(day):
+    """Everything the window shows for one day, read from the database. Runs off the window's
+    thread. Doesn't re-tier today's picks (Update and Pull do that), so viewing never writes."""
+    from budget import credits_left, daily_budget
+    from clv import clv_summary
+    from db import get_meta
+    from nba_extra import context_lines
+    from nba_live import live_for, live_text
+    from picks import build_board, learned_trust, records
+    from app_hot import load_hot, load_parlays
+    con = connect()
+    try:
+        out = {"credits": (credits_left(con), daily_budget(con))}
+        save = False
+        if day >= today_str():             # today's picks never tiered yet (e.g. first open): tier them once
+            tiered = con.execute("SELECT 1 FROM predictions WHERE game_date=? AND tier IS NOT NULL UNION ALL "
+                                 "SELECT 1 FROM game_predictions WHERE game_date=? AND tier IS NOT NULL LIMIT 1",
+                                 (day, day)).fetchone()
+            lines = con.execute("SELECT 1 FROM predictions WHERE game_date=? AND market_over IS NOT NULL "
+                                "UNION ALL SELECT 1 FROM game_predictions WHERE game_date=? LIMIT 1",
+                                (day, day)).fetchone()
+            save = bool(lines and not tiered)
+        board, n_props, n_games = build_board(con, day, save=save)
+        players, games = live_for(con, day)
+        for e in board:
+            e["live"] = None if e["result"] else live_text(e, players, games)
+            e["context"] = context_lines(con, e, day)
+        out["board"] = (board, n_props, n_games)
+        out["scores"] = con.execute("SELECT * FROM live_games WHERE game_date=? ORDER BY tip_utc",
+                                    (day,)).fetchall()
+        since = (datetime.now(ET).date() - timedelta(days=30)).isoformat()
+        out["record"] = (records(con), records(con, since), clv_summary(con), learned_trust(con))
+        snap = con.execute("SELECT MAX(snapshot_date) FROM injuries WHERE snapshot_date<=?", (day,)).fetchone()[0]
+        rows = con.execute("SELECT * FROM injuries WHERE snapshot_date=? ORDER BY team, status, player",
+                           (snap,)).fetchall() if snap else []
+        out["injuries"] = (snap, rows, get_meta(con, "nba_injury_report"))
+        out["hot"] = load_hot(con, day)
+        out["parlays"] = load_parlays(con, day)
+        return out
+    finally:
+        con.close()
 
 
 # ======================= pull dialog =======================

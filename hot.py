@@ -313,7 +313,10 @@ def grade_legs(con):
 
 
 def leg_result(con, day, key, team, stat, t=None, line=None, side="Over"):
-    """('W'|'L'|'DNP', actual) once the team's game is in the box scores, else None."""
+    """('W'|'L'|'DNP', actual) once the team's game is over and in the box scores, else None."""
+    from nba_live import game_over
+    if not game_over(con, day, team):
+        return None                     # still being played: NBA.com's game log can be partial
     if not con.execute("SELECT 1 FROM player_games WHERE game_date=? AND team=? LIMIT 1", (day, team)).fetchone():
         return None
     r = con.execute("SELECT pts, fg3m, reb, ast, min FROM player_games WHERE game_date=? AND player_key=?",

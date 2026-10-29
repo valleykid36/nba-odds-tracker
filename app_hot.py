@@ -91,14 +91,20 @@ def _sort_hot(app, key):
     fill_hot_tree(app)
 
 
-def fill_hot(app, con, day):
+def load_hot(con, day):
+    """(cards, prices, error) for the Hot players tab. Runs on the background thread."""
     from hot import board, milestone_prices
     try:
-        app.hot_cards = board(con, day)
-        app.hot_prices = milestone_prices(con, day)
+        return board(con, day), milestone_prices(con, day), None
     except Exception as e:
-        app.hot_cards, app.hot_prices = [], {}
-        app.hot_lbl.configure(text=f"Couldn't build the hot board: {e}")
+        return [], {}, e
+
+
+def fill_hot(app, cards, prices, err=None):
+    app.hot_cards, app.hot_prices = cards, prices
+    if err:
+        app.hot_tree.delete(*app.hot_tree.get_children())
+        app.hot_lbl.configure(text=f"Couldn't build the hot board: {err}")
         return
     fill_hot_tree(app)
 
@@ -210,11 +216,10 @@ def build_parlay_tab(app, C, FONT):
     app.parlay_rows = {}
 
 
-def fill_parlays(app, con, day):
+def load_parlays(con, day):
+    """Parlays for the day with each leg's outcome, the record and calibration (background thread)."""
     from hot import calibration
     from parlay import build, leg_outcome, record
-    t = app.parlay_tree
-    t.delete(*t.get_children())
     rows = con.execute("SELECT * FROM parlays WHERE game_date=? ORDER BY priced DESC, p_hit DESC", (day,)).fetchall()
     parlays = [(r["name"], json.loads(r["legs"]), r["p_hit"], r["price"], r["ev"], r["priced"], r["result"])
                for r in rows]
@@ -223,6 +228,14 @@ def fill_parlays(app, con, day):
             parlays = [(n, ls, p, pr, ev, priced, None) for n, ls, p, pr, ev, priced in build(con, day)]
         except Exception:
             parlays = []
+    outcomes = {(i, j): leg_outcome(con, day, l) for i, x in enumerate(parlays) for j, l in enumerate(x[1])}
+    return parlays, outcomes, record(con), calibration(con)
+
+
+def fill_parlays(app, data):
+    parlays, outcomes, rec, cal = data
+    t = app.parlay_tree
+    t.delete(*t.get_children())
     app.parlay_rows = {}
     for i, (name, ls, p, price, ev, priced, result) in enumerate(parlays):
         pid = f"p{i}"
@@ -231,7 +244,7 @@ def fill_parlays(app, con, day):
             name, f"{p:.0%}", f"{price:+d}", "", f"{ev:+.1%}" if priced else "fair", f"{len(ls)} legs", res))
         app.parlay_rows[pid] = (name, ls, p, price)
         for j, l in enumerate(ls):
-            out = leg_outcome(con, day, l)
+            out = outcomes.get((i, j))
             lr = "" if not out else ("✓" if out[0] == "W" else "✗" if out[0] == "L" else "DNP") + \
                 (f" {out[1]}" if out[1] is not None else "")
             t.insert(pid, "end", iid=f"{pid}-{j}", tags=((out[0] if out else ""),), values=(
@@ -244,7 +257,6 @@ def fill_parlays(app, con, day):
         + ("" if priced_n else " · pull lines for real prices") if parlays else
         "No parlays yet. Click Update (free) for ideas, or pull lines for priced parlays."))
 
-    rec, cal = record(con), calibration(con)
     parts = [("PARLAY RECORD\n", "label")]
     if rec["w"] + rec["l"]:
         parts.append((f"{rec['w']}-{rec['l']}  ·  {rec['units']:+.2f} units (1 unit each)\n",

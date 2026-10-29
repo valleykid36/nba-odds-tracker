@@ -11,7 +11,7 @@ Built entirely from the box scores already in nba.db (no extra downloads):
 
 import math
 from collections import defaultdict, deque
-from datetime import date as _date
+from datetime import date as _date, datetime, timedelta
 
 from config import (CURRENT_SEASON, ELO_HOME, ELO_K, ELO_PER_POINT, ELO_REVERT,
                     MARGIN_SD, REST_B2B_POINTS, TEAM_WINDOW, TOTAL_SD, implied, team_abbr)
@@ -22,8 +22,24 @@ def phi(x):
 
 
 # ---------------- team game results from box scores ----------------
+_results_cache = {}
+
+
 def team_results(con, before_date=None):
-    """One row per game: date, season, home, away, home_pts, away_pts (in date order)."""
+    """One row per game: date, season, home, away, home_pts, away_pts (in date order).
+    Cached until the box scores change (the window asks for this on every refresh)."""
+    stamp = tuple(con.execute("SELECT COUNT(*), MAX(game_date), SUM(pts) FROM player_games WHERE game_date>=?",
+                              ((datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d"),)).fetchone())
+    stamp += (con.execute("SELECT COUNT(*) FROM player_games").fetchone()[0],)
+    key = (before_date, stamp)
+    if key not in _results_cache:
+        if len(_results_cache) > 8:
+            _results_cache.clear()
+        _results_cache[key] = _team_results(con, before_date)
+    return list(_results_cache[key])
+
+
+def _team_results(con, before_date=None):
     q = ("SELECT game_id, game_date, season, team, home, SUM(pts) pts FROM player_games "
          + ("WHERE game_date<? " if before_date else "") + "GROUP BY game_id, team ORDER BY game_date")
     rows = con.execute(q, (before_date,) if before_date else ()).fetchall()

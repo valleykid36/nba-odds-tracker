@@ -55,11 +55,12 @@ def _basketball_day():
     return (datetime.now(ET) - timedelta(hours=6)).date().isoformat()
 
 
-def _stats_scoreboard():
+def _stats_scoreboard(day=None):
     from nba_api.stats.endpoints import scoreboardv3
-    raw = scoreboardv3.ScoreboardV3(game_date=_basketball_day(), timeout=30).get_dict()
+    day = day or _basketball_day()
+    raw = scoreboardv3.ScoreboardV3(game_date=day, timeout=30).get_dict()
     sb = raw.get("scoreboard", {})
-    sb.setdefault("gameDate", _basketball_day())
+    sb.setdefault("gameDate", day)
     return sb                          # same field names as the CDN scoreboard
 
 
@@ -104,74 +105,134 @@ def fetch_scoreboard(verbose=True):
 
 
 def fetch_box(game, status):
-    if _source["name"] == "cdn":
+    if _source["name"] != "stats":
         try:
             return get(BOXSCORE.format(game["gameId"])).get("game", {})
         except requests.HTTPError as e:
             if e.response is None or e.response.status_code != 403:
                 raise                  # 404 = not posted yet; handled by the caller
+        except requests.RequestException:
+            pass                       # cdn unreachable: try stats.nba.com
     return _stats_box(game, status)
 
 
-def update_live(verbose=True):
-    """Refresh today's scoreboard and the box score of every started game.
-    Returns (games, finished games newly saved to player_games)."""
-    sb = fetch_scoreboard(verbose)
-    day, games = sb.get("gameDate", ""), sb.get("games", [])
-    con = connect()
-    snap, newly_final = now_utc(), 0
-    for g in games:
-        gid, status = g["gameId"], int(g.get("gameStatus", 1))
-        home, away = g["homeTeam"], g["awayTeam"]
-        prev = con.execute("SELECT status FROM live_games WHERE game_id=?", (gid,)).fetchone()
-        was_final = prev is not None and prev["status"] == FINAL
-        def save_game(st=status, text=(g.get("gameStatusText") or "").strip()):
-            con.execute("INSERT OR REPLACE INTO live_games VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
-                gid, day, g.get("gameTimeUTC", ""), home["teamTricode"], away["teamTricode"],
-                home.get("score", 0), away.get("score", 0), st, text,
-                g.get("period", 0), clock(g.get("gameClock")), snap))
-        if status == SCHEDULED or (status == FINAL and was_final):
-            save_game()                    # nothing to fetch (not started, or already saved)
-            continue
+# ---------- games left unfinished ----------
+# NBA.com's "today's scoreboard" only ever shows one day. If the last refresh of a night
+# caught a late game in the 3rd quarter, the scoreboard has moved on to the next day by the
+# next refresh, so that game would sit at "3rd Qtr" forever and its picks would never grade.
+# These helpers go back for any earlier game that wasn't saved as Final.
+
+STALE_DAYS = 7      # look back this far for games stuck before Final
+
+
+def stale_games(con, day):
+    """live_games rows before `day` (last 7 days) that were never saved as Final."""
+    since = (datetime.fromisoformat(day) - timedelta(days=STALE_DAYS)).date().isoformat()
+    return con.execute("SELECT * FROM live_games WHERE status<>? AND game_date<? AND game_date>=? "
+                       "ORDER BY game_date", (FINAL, day, since)).fetchall()
+
+
+def _fetch_old_game(row, sb_cache, verbose):
+    """(scoreboard-style game dict, box or None) for a game from an earlier day."""
+    try:                                   # NBA.com's box score file has the score and status too
+        box = get(BOXSCORE.format(row["game_id"])).get("game", {})
+        if box.get("homeTeam") and box.get("gameStatus"):
+            return box, box
+    except Exception:
+        pass
+    day = row["game_date"]
+    if day not in sb_cache:                # fallback: stats.nba.com scoreboard for that date
+        try:
+            sb_cache[day] = {g["gameId"]: g for g in _stats_scoreboard(day).get("games", [])}
+        except Exception as e:
+            if verbose:
+                print(f"   couldn't re-check {day}'s games ({e}); will try next refresh")
+            sb_cache[day] = {}
+    g = sb_cache[day].get(row["game_id"])
+    return (g, None) if g else (None, None)
+
+
+def _save_game(con, gid, day, g, status, text, snap):
+    home, away = g["homeTeam"], g["awayTeam"]
+    con.execute("INSERT OR REPLACE INTO live_games VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
+        gid, day, g.get("gameTimeUTC", ""), home["teamTricode"], away["teamTricode"],
+        home.get("score", 0), away.get("score", 0), status, text,
+        g.get("period", 0), clock(g.get("gameClock")), snap))
+
+
+def _process(con, day, g, snap, verbose, box=None):
+    """Save one game's score and (once started) its box score. Returns 1 if it just went final."""
+    gid, status = g["gameId"], int(g.get("gameStatus", 1))
+    home, away = g["homeTeam"], g["awayTeam"]
+    text = (g.get("gameStatusText") or "").strip()
+    prev = con.execute("SELECT status FROM live_games WHERE game_id=?", (gid,)).fetchone()
+    was_final = prev is not None and prev["status"] == FINAL
+    if status == SCHEDULED or (status == FINAL and was_final):
+        _save_game(con, gid, day, g, status, text, snap)  # nothing to fetch (not started, or already saved)
+        return 0
+    if box is None:
         try:
             box = fetch_box(g, status)
         except Exception as e:
             if verbose:
                 print(f"   {away['teamTricode']} @ {home['teamTricode']}: box score not up yet ({e})")
             if status != FINAL:
-                save_game()                # score/clock still useful; a Final waits for its box score
+                _save_game(con, gid, day, g, status, text, snap)  # score/clock still useful
+            return 0
+    rows, finals = [], []
+    for side, opp_side, is_home in (("homeTeam", "awayTeam", 1), ("awayTeam", "homeTeam", 0)):
+        team, opp = box[side]["teamTricode"], box[opp_side]["teamTricode"]
+        for p in box[side].get("players", []):
+            s = p.get("statistics", {})
+            name = p.get("name") or f"{p.get('firstName', '')} {p.get('familyName', '')}".strip()
+            played = 1 if str(p.get("played", "0")) == "1" else 0
+            mins = iso_minutes(s.get("minutes"))
+            vals = [int(s.get(k, 0) or 0) for k in (
+                "points", "reboundsTotal", "assists", "steals", "blocks",
+                "threePointersMade", "threePointersAttempted")]
+            rows.append((gid, p["personId"], day, name, player_key(name), team, played, mins,
+                         *vals, snap))
+            if played and gid.startswith("002"):   # regular season, same as NBA.com game logs
+                st = lambda k: int(s.get(k, 0) or 0)
+                finals.append((
+                    gid, day, CURRENT_SEASON, p["personId"], name, player_key(name), team, opp,
+                    is_home, mins, st("points"), st("reboundsTotal"), st("assists"), st("steals"),
+                    st("blocks"), st("turnovers"), st("fieldGoalsMade"), st("fieldGoalsAttempted"),
+                    st("threePointersMade"), st("threePointersAttempted"), st("freeThrowsMade"),
+                    st("freeThrowsAttempted"), st("reboundsOffensive"), st("reboundsDefensive")))
+    con.executemany("INSERT OR REPLACE INTO live_box VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    box_final = int(box.get("gameStatus", status)) == FINAL
+    newly = 0
+    if box_final and finals:
+        con.executemany("INSERT OR REPLACE INTO player_games VALUES (" + ",".join("?" * 24) + ")", finals)
+        newly = 1
+    if status == FINAL and not box_final:
+        _save_game(con, gid, day, g, LIVE, "Final (stats finishing)", snap)  # grade next refresh
+    else:
+        _save_game(con, gid, day, g, status, text, snap)
+    return newly
+
+
+def update_live(verbose=True):
+    """Refresh today's scoreboard and the box score of every started game, then go back for any
+    earlier game that was left unfinished. Returns (games, finished games newly saved)."""
+    sb = fetch_scoreboard(verbose)
+    day, games = sb.get("gameDate", ""), sb.get("games", [])
+    con = connect()
+    snap, newly_final = now_utc(), 0
+    for g in games:
+        newly_final += _process(con, day, g, snap, verbose)
+    con.commit()
+
+    fixed, sb_cache = [], {}
+    for row in stale_games(con, day or _basketball_day()):
+        g, box = _fetch_old_game(row, sb_cache, verbose)
+        if not g:
             continue
-        rows, finals = [], []
-        for side, opp_side, is_home in (("homeTeam", "awayTeam", 1), ("awayTeam", "homeTeam", 0)):
-            team, opp = box[side]["teamTricode"], box[opp_side]["teamTricode"]
-            for p in box[side].get("players", []):
-                s = p.get("statistics", {})
-                name = p.get("name") or f"{p.get('firstName', '')} {p.get('familyName', '')}".strip()
-                played = 1 if str(p.get("played", "0")) == "1" else 0
-                mins = iso_minutes(s.get("minutes"))
-                vals = [int(s.get(k, 0) or 0) for k in (
-                    "points", "reboundsTotal", "assists", "steals", "blocks",
-                    "threePointersMade", "threePointersAttempted")]
-                rows.append((gid, p["personId"], day, name, player_key(name), team, played, mins,
-                             *vals, snap))
-                if played and gid.startswith("002"):   # regular season, same as NBA.com game logs
-                    st = lambda k: int(s.get(k, 0) or 0)
-                    finals.append((
-                        gid, day, CURRENT_SEASON, p["personId"], name, player_key(name), team, opp,
-                        is_home, mins, st("points"), st("reboundsTotal"), st("assists"), st("steals"),
-                        st("blocks"), st("turnovers"), st("fieldGoalsMade"), st("fieldGoalsAttempted"),
-                        st("threePointersMade"), st("threePointersAttempted"), st("freeThrowsMade"),
-                        st("freeThrowsAttempted"), st("reboundsOffensive"), st("reboundsDefensive")))
-        con.executemany("INSERT OR REPLACE INTO live_box VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
-        box_final = int(box.get("gameStatus", status)) == FINAL
-        if box_final and finals:
-            con.executemany("INSERT OR REPLACE INTO player_games VALUES (" + ",".join("?" * 24) + ")",
-                            finals)
-            newly_final += 1
-        if status == FINAL and not box_final:
-            save_game(LIVE, "Final (stats finishing)")   # box score not final yet: grade next refresh
-        else:
-            save_game()
+        n = _process(con, row["game_date"], g, snap, verbose, box=box)
+        newly_final += n
+        if int(g.get("gameStatus", 1)) == FINAL:
+            fixed.append(f"{row['away']} @ {row['home']} ({row['game_date']})")
     con.commit()
     con.close()
     if verbose:
@@ -179,7 +240,31 @@ def update_live(verbose=True):
         done = sum(1 for g in games if int(g.get("gameStatus", 1)) == FINAL)
         print(f"   live scores ({day}, via {_source['name']}): {len(games)} games, {live} in progress, {done} final"
               + (f"; {newly_final} newly final, saved for grading" if newly_final else ""))
+        if fixed:
+            print(f"   caught up {len(fixed)} game(s) left unfinished last time: {', '.join(fixed)}")
     return games, newly_final
+
+
+def game_over(con, day, team):
+    """True once a team's game on `day` is over, so it's safe to grade from the box scores.
+    Live scoreboard says Final -> over. 2+ days ago -> over (NBA.com's game log has the final
+    by then). Yesterday or today -> only when the scoreboard says Final, because NBA.com's game
+    log also lists games still being played (a 1 AM update would otherwise grade a 3rd quarter)."""
+    r = con.execute("SELECT status FROM live_games WHERE game_date=? AND (home=? OR away=?)",
+                    (day, team, team)).fetchone()
+    if r is not None and r["status"] == FINAL:
+        return True
+    today = datetime.now(ET).date()
+    if day <= (today - timedelta(days=2)).isoformat():
+        return True
+    return r is None and day < today.isoformat() and day < _basketball_day()
+
+
+def unfinished_game_ids(con):
+    """Game ids from today/yesterday that aren't Final yet (their game-log rows are partial)."""
+    since = (datetime.now(ET).date() - timedelta(days=1)).isoformat()
+    return {r[0] for r in con.execute("SELECT game_id FROM live_games WHERE status<>? AND game_date>=?",
+                                      (FINAL, since))}
 
 
 def live_for(con, game_date):
@@ -193,9 +278,12 @@ def live_for(con, game_date):
 
 
 def games_active(con, game_date):
-    """True while any of the day's games is in progress or about to start."""
+    """True while any of the day's games (or last night's, after midnight) is in progress or
+    about to start."""
     now = datetime.now(timezone.utc)
-    for r in con.execute("SELECT status, tip_utc FROM live_games WHERE game_date=?", (game_date,)):
+    yesterday = (datetime.fromisoformat(game_date) - timedelta(days=1)).date().isoformat()
+    for r in con.execute("SELECT status, tip_utc FROM live_games WHERE game_date IN (?,?)",
+                         (game_date, yesterday)):
         if r["status"] == LIVE:
             return True
         if r["status"] == SCHEDULED and r["tip_utc"]:

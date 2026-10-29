@@ -143,6 +143,15 @@ def update_player_games(seasons=None):
             print(f"   {season}: giving up for now; try again later")
             continue
         df["GAME_DATE"] = df["GAME_DATE"].astype(str).str[:10]
+        try:                       # skip games still being played: their rows are partial
+            from nba_live import unfinished_game_ids
+            skip = unfinished_game_ids(con)
+        except Exception:
+            skip = set()
+        if skip:
+            df = df[~df["GAME_ID"].astype(str).isin(skip)]
+            con.execute(f"DELETE FROM player_games WHERE game_id IN ({','.join('?' * len(skip))})",
+                        tuple(skip))      # partial rows saved by an earlier run come back at the final
         save_box_rows(con, [box_row(r) for r in df.to_dict("records")])
         print(f"   {season}: {len(df):,} player-games saved")
         time.sleep(2)

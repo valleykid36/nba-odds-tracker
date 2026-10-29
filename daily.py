@@ -77,7 +77,15 @@ def catch_up(con):
     if missing:
         print("Downloading past seasons (one time, a few minutes):", ", ".join(missing))
 
-    # 2) Box scores (catches every missed game)
+    # 2) Live/finished games from NBA.com's scoreboard (free), first: it also goes back for any game
+    #    a late-night refresh left unfinished, and tells the box-score step which games aren't over yet
+    try:
+        from nba_live import update_live
+        update_live()
+    except Exception as e:
+        print(f"   couldn't reach the NBA.com scoreboard ({e}); finished games grade on the next update")
+
+    # 2b) Box scores (catches every missed game)
     from ingest import update_injuries, update_player_games
     count = "SELECT COUNT(DISTINCT game_id) FROM player_games WHERE season=?"
     before = con.execute(count, (CURRENT_SEASON,)).fetchone()[0]
@@ -85,13 +93,6 @@ def catch_up(con):
     update_player_games(missing + SEASONS[-1:])
     after = con.execute(count, (CURRENT_SEASON,)).fetchone()[0]
     print(f"   {after - before} new games added this season ({after} total)\n")
-
-    # 2b) Today's live/finished games from NBA.com's scoreboard (free) so tonight's picks grade fast
-    try:
-        from nba_live import update_live
-        update_live()
-    except Exception as e:
-        print(f"   couldn't reach the NBA.com scoreboard ({e}); finished games grade on the next update")
 
     # 3) Grade everything pending, 4) what you missed
     grade(con)
@@ -121,6 +122,14 @@ def catch_up(con):
         except Exception as e:
             print(f"   couldn't get team stats ({e}); will try again next update")
 
+    # One time: milestone legs/parlays from the last few days may have been graded off a game that
+    # was still being played (a late-night update). Clear those so they re-grade from final box scores.
+    if not get_meta(con, "regrade_late_games_v1"):
+        since = (datetime.fromisoformat(today()) - timedelta(days=5)).strftime("%Y-%m-%d")
+        con.execute("UPDATE hot_legs SET result=NULL, actual=NULL WHERE game_date>=?", (since,))
+        con.execute("UPDATE parlays SET result=NULL, legs_won=NULL, legs_graded=NULL WHERE game_date>=?", (since,))
+        set_meta(con, "regrade_late_games_v1", today())
+
     # 7) Hot players, milestone legs and parlays for today; grades past ones (free)
     print("\nHot players and parlays...")
     try:
@@ -128,6 +137,11 @@ def catch_up(con):
         refresh(con)
     except Exception as e:
         print(f"   couldn't build hot players / parlays ({e})")
+    try:
+        from picks import build_board
+        build_board(con, today(), save=True)  # re-tier today's picks with the fresh injury news
+    except Exception as e:
+        print(f"   couldn't re-tier today's picks ({e})")
     set_meta(con, "last_run", today())
 
 
@@ -228,14 +242,15 @@ def grade(con, quiet=False):
     # today's games count too: finished games come in from the live scoreboard (nba_live.py)
     pending = con.execute("SELECT * FROM predictions WHERE actual IS NULL AND game_date<=?",
                           (today(),)).fetchall()
-    # A game only counts once it's over. NBA.com's game logs can include games still being
-    # played, so today's games wait for the live scoreboard to say Final.
-    live = {(r["game_date"], t): r["status"] for r in con.execute(
-        "SELECT game_date, home, away, status FROM live_games") for t in (r["home"], r["away"])}
+    # A game only counts once it's over (see nba_live.game_over): NBA.com's game logs include
+    # games still being played, so last night's late games wait for the scoreboard to say Final.
+    from nba_live import game_over
+    cache = {}
 
     def finished(day, team):
-        st = live.get((day, team))
-        return st == 3 if st is not None else day < today()
+        if (day, team) not in cache:
+            cache[(day, team)] = game_over(con, day, team)
+        return cache[(day, team)]
 
     done, days = 0, set()
     for p in pending:

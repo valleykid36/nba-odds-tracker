@@ -1,0 +1,40 @@
+diff --git a/nba_injury.py b/nba_injury.py
+index b08abf2..07f85e6 100644
+--- a/nba_injury.py
++++ b/nba_injury.py
+@@ -36,6 +36,9 @@ _SKIP = re.compile(r"^(Injury ?Report:|Page ?\d+ ?of ?\d+|Game ?Date\b)")
+ # pdfplumber often drops the spaces inside cells ("BrooklynNets", "NOTYETSUBMITTED"),
+ # so teams are matched with spaces removed and wrapped reason lines are re-attached below.
+ _TEAMS_NOSPACE = sorted(((t.replace(" ", ""), t) for t in set(TEAM_ABBR)), key=lambda x: len(x[0]), reverse=True)
++# Every reason starts with one of the league's categories. A loose line that starts with one
++# is the top half of the NEXT player's reason; anything else is the tail of the previous one.
++_REASON_START = re.compile(r"^(Injury|GLeague|NotWithTeam|Personal|League|Team|Rest|Health|Suspension)", re.I)
+ _SUFFIX = re.compile(r"(?<=[a-z])(Jr\.?|Sr\.?|III|II|IV)$")
+ 
+ 
+@@ -82,9 +85,9 @@ def _spaced(text):
+ def parse_lines(lines):
+     """Text lines from the PDF -> list of row dicts. Blank date/time/matchup/team carry down.
+ 
+-    A reason that wraps onto two lines is printed around the player's row (part above, part
+-    below), so loose lines wait in `pending`: they belong to the next player if that player's
+-    row has no reason of its own, otherwise to the player before.
++    A reason that wraps is printed around the player's row (part above, part below). A loose
++    line that starts like a reason ("Injury/Illness-...", "GLeague-...") waits in `pending` for
++    the next player; any other loose line finishes the reason it follows.
+     """
+     rows, cur = [], {"date": "", "time": "", "matchup": "", "team": ""}
+     not_submitted, pending = [], []
+@@ -137,7 +140,11 @@ def parse_lines(lines):
+                              player_key=player_key(name), status=m.group("status"),
+                              reason=reason))
+         elif line:
+-            pending.append(_spaced(line))     # wrapped reason text; placed when the next row arrives
++            text = _spaced(line)
++            if pending or _REASON_START.match(line.replace(" ", "")) or not rows:
++                pending.append(text)          # top of the next player's reason
++            else:
++                rows[-1]["reason"] = (rows[-1]["reason"] + " " + text).strip()   # tail of the last one
+     flush_to_previous()
+     return rows, not_submitted
+ 

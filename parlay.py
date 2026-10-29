@@ -179,6 +179,9 @@ def leg_outcome(con, day, l):
     stat = "pra" if sorted(stats) == ["ast", "pts", "reb"] else stats[0] if len(stats) == 1 else None
     if stat:
         return leg_result(con, day, l["player_key"], l["team"], stat, line=l["line"], side=l["side"])
+    from nba_live import game_over
+    if not game_over(con, day, l["team"]):
+        return None
     r = con.execute(f"SELECT {'+'.join(stats)} v, min FROM player_games WHERE game_date=? AND player_key=?",
                     (day, l["player_key"])).fetchone()
     if not con.execute("SELECT 1 FROM player_games WHERE game_date=? AND team=? LIMIT 1", (day, l["team"])).fetchone():

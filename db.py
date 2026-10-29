@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS player_games (
 );
 CREATE INDEX IF NOT EXISTS ix_pg_player ON player_games(player_key, game_date);
 CREATE INDEX IF NOT EXISTS ix_pg_team ON player_games(team, game_date);
+CREATE INDEX IF NOT EXISTS ix_pg_date ON player_games(game_date);
+CREATE INDEX IF NOT EXISTS ix_pg_season ON player_games(season, player_key);
 
 CREATE TABLE IF NOT EXISTS odds_snapshots (
     snapshot_utc TEXT, event_id TEXT, tipoff_et TEXT, game_date TEXT,
@@ -115,6 +117,7 @@ CREATE TABLE IF NOT EXISTS live_box (
     PRIMARY KEY (game_id, player_id)
 );
 CREATE INDEX IF NOT EXISTS ix_live_box ON live_box(game_date, player_key);
+CREATE INDEX IF NOT EXISTS ix_live_games ON live_games(game_date);
 
 -- Daily snapshots of NBA.com team and shooting stats (one row per day, so the
 -- model can later be tested using only what was known on each date).
@@ -162,13 +165,25 @@ NEW_COLUMNS = [  # added after the first version; older databases get them autom
 ]
 
 
+_ready = set()      # database files already set up by this process
+
+
 def connect():
-    con = sqlite3.connect(DB_FILE)
+    """Open nba.db. The first call in a process creates missing tables/columns; later calls skip
+    that. WAL mode lets the window read while an update is writing (no freezes on 'database is
+    locked'), and synchronous=NORMAL avoids a full disk flush on every save, which is slow on Windows."""
+    con = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
     con.row_factory = sqlite3.Row
-    con.executescript(SCHEMA)
-    for table, col, kind in NEW_COLUMNS:
-        cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
-        if col not in cols:
-            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
-    con.commit()
+    con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA cache_size=-32000")       # 32 MB page cache
+    con.execute("PRAGMA temp_store=MEMORY")
+    if DB_FILE not in _ready:
+        con.execute("PRAGMA journal_mode=WAL")    # stored in the file; only needs setting once
+        con.executescript(SCHEMA)
+        for table, col, kind in NEW_COLUMNS:
+            cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
+        con.commit()
+        _ready.add(DB_FILE)
     return con
